@@ -1,0 +1,12 @@
+{
+  "name": "engineering-guard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "demo:shallow": "npm --prefix demo run test:shallow",
+    "demo:behavior": "npm --prefix demo run test:behavior",
+    "demo:implement": "npm --prefix demo run test:implement",
+    "demo:security": "node demo/security/verify-regression.mjs"
+  }
+}

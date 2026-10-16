@@ -1,0 +1,40 @@
+{
+  "description": "Engineering Guard policy delivery and pre-write gates.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/testing-guard.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|apply_patch)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/testing-guard.mjs",
+            "timeout": 5,
+            "statusMessage": "Checking Engineering Guard policies"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .codex/hooks/testing-guard.mjs",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

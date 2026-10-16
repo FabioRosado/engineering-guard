@@ -1,0 +1,10 @@
+{
+  "name": "engineering-guard-demo",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test:shallow": "node --test test/shallow.test.cjs",
+    "test:behavior": "node --test test/behavior.test.cjs",
+    "test:implement": "node --test implement/test/behavior.test.cjs"
+  }
+}

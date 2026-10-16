@@ -1,0 +1,5 @@
+# Security Review demo
+
+Run `npm run demo:security` to exercise the cross-user record-access regression against the vulnerable and corrected fixtures. The command succeeds only when the test fails against the vulnerable implementation for the expected reason and passes against the corrected one.
+
+From the repository root, invoke `$engineering-guard-security` and ask it to review `demo/security/vulnerable/user-records.mjs`, then compare it with `demo/security/fixed/user-records.mjs`. These functions model the handler for `GET /api/records/:recordId` after authentication middleware supplies the principal. The reviewer should trace that principal and the URL-controlled record ID, report the cross-user disclosure with evidence and a focused ownership-check remediation, and find no equivalent issue in the corrected fixture. API1:2023 Broken Object Level Authorization, A01:2025 Broken Access Control, and CWE-639 are appropriate mappings if the source analysis confirms them. This is a local, controlled fixture; do not perform remote testing.
