@@ -1,4 +1,5 @@
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -11,6 +12,9 @@ SNAPSHOT_SCRIPT = Path(__file__).resolve().with_name("verification_snapshot.py")
 OUTPUT_LIMIT = 20_000
 BUFFER_LIMIT = 2 * 1024 * 1024
 TIMEOUT_SECONDS = 120
+CLEANUP_TIMEOUT_SECONDS = 5
+TERMINATE_GRACE_SECONDS = 1
+POLL_INTERVAL_SECONDS = 0.01
 COVERAGE_PATHS = (
     "coverage/coverage-summary.json",
     "coverage/coverage-final.json",
@@ -136,7 +140,47 @@ def _capture_stream(stream, captured, overflow, overflow_streams, stream_name, l
             overflow.set()
 
 
+def _process_group_state(process_group_id):
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return "absent"
+    except PermissionError:
+        return "present"
+    except OSError:
+        return "unknown"
+    return "present"
+
+
+def _signal_process_group(process_group_id, requested_signal):
+    try:
+        os.killpg(process_group_id, requested_signal)
+    except ProcessLookupError:
+        return "absent"
+    except OSError:
+        return "failed"
+    return "sent"
+
+
 def _run_npm_script(root, name):
+    interruption = {"signal": None}
+
+    def remember_interruption(signum, _frame):
+        if interruption["signal"] is None:
+            interruption["signal"] = signum
+
+    previous_handlers = {}
+    try:
+        # The child has its own session, so runner interrupts must enter bounded cleanup explicitly.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, remember_interruption)
+        return _run_npm_script_with_interrupt_state(root, name, interruption)
+    finally:
+        for signum, previous_handler in previous_handlers.items():
+            signal.signal(signum, previous_handler)
+
+
+def _run_npm_script_with_interrupt_state(root, name, interruption):
     command = ["npm", "run", "--ignore-scripts", name]
     started = time.monotonic()
     error = None
@@ -145,8 +189,16 @@ def _run_npm_script(root, name):
     overflow = threading.Event()
     overflow_streams = set()
     lock = threading.Lock()
+    is_posix = os.name == "posix"
     try:
-        process = subprocess.Popen(command, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(
+            command,
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=is_posix,
+        )
     except OSError as exception:
         duration_ms = int((time.monotonic() - started) * 1000)
         return {
@@ -158,63 +210,194 @@ def _run_npm_script(root, name):
             "stdout": "",
             "stderr": "",
             "outputTruncated": False,
+            "cleanup": {
+                "status": "not_needed",
+                "directProcessReaped": None,
+                "outputReadersStopped": True,
+                "trackedProcessGroup": "not_observable",
+                "terminationRequestsSent": [],
+            },
         }
 
     readers = [
-        threading.Thread(target=_capture_stream, args=(process.stdout, stdout, overflow, overflow_streams, "stdout", lock)),
-        threading.Thread(target=_capture_stream, args=(process.stderr, stderr, overflow, overflow_streams, "stderr", lock)),
+        threading.Thread(
+            target=_capture_stream,
+            args=(process.stdout, stdout, overflow, overflow_streams, "stdout", lock),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_capture_stream,
+            args=(process.stderr, stderr, overflow, overflow_streams, "stderr", lock),
+            daemon=True,
+        ),
     ]
     for reader in readers:
         reader.start()
 
-    deadline = started + TIMEOUT_SECONDS
-    while process.poll() is None:
-        if overflow.is_set():
+    command_deadline = started + TIMEOUT_SECONDS
+    process_group_id = process.pid if is_posix else None
+    cleanup_deadline = None
+    cleanup_reason = None
+    termination_sent_at = None
+    force_kill_sent = False
+    cleanup_signal_error = None
+    process_group_status = "not_observable"
+    termination_requests_sent = []
+
+    while True:
+        now = time.monotonic()
+        return_code = process.poll()
+        readers_stopped = all(not reader.is_alive() for reader in readers)
+
+        if interruption["signal"] is not None and cleanup_deadline is None:
+            signal_name = signal.Signals(interruption["signal"]).name
+            error = {"code": "EINTR", "message": f"Command interrupted by {signal_name}"}
+            cleanup_reason = "interrupted"
+        elif overflow.is_set() and error is None:
             streams = ", ".join(sorted(overflow_streams))
             error = {"code": "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", "message": f"{streams} exceeded the 2 MB capture limit"}
-            process.kill()
-            break
-        if time.monotonic() >= deadline:
+            cleanup_reason = "output_limit"
+        elif return_code is None and now >= command_deadline and cleanup_deadline is None:
             error = {"code": "ETIMEDOUT", "message": f"Command timed out after {TIMEOUT_SECONDS} seconds"}
-            process.kill()
-            break
-        time.sleep(0.01)
+            cleanup_reason = "timeout"
 
-    process.wait()
-    for reader in readers:
-        reader.join()
-    if overflow.is_set() and error is None:
-        streams = ", ".join(sorted(overflow_streams))
-        error = {"code": "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", "message": f"{streams} exceeded the 2 MB capture limit"}
+        if cleanup_deadline is None and return_code is not None:
+            if is_posix:
+                process_group_status = _process_group_state(process_group_id)
+                if process_group_status != "absent":
+                    cleanup_reason = "remaining_process_group"
+            if cleanup_reason is None and not readers_stopped:
+                cleanup_reason = "reader_drain"
+            if cleanup_reason is None:
+                break
 
-    return_code = process.returncode
-    exit_code = return_code if return_code >= 0 else None
-    signal_name = signal.Signals(-return_code).name if return_code < 0 else None
-    stdout_text = stdout.decode("utf-8", "replace")
-    stderr_text = stderr.decode("utf-8", "replace")
-    trimmed_stdout = trim_output(stdout_text)
-    trimmed_stderr = trim_output(stderr_text)
+        if cleanup_reason is not None and cleanup_deadline is None:
+            cleanup_deadline = now + CLEANUP_TIMEOUT_SECONDS
+            if is_posix:
+                process_group_status = _process_group_state(process_group_id)
+                if process_group_status != "absent":
+                    termination_result = _signal_process_group(process_group_id, signal.SIGTERM)
+                    termination_sent_at = now
+                    if termination_result == "sent":
+                        termination_requests_sent.append("SIGTERM")
+                    if termination_result == "failed":
+                        cleanup_signal_error = "Could not send SIGTERM to the tracked process group"
+            elif return_code is None:
+                # shortcut: Windows stops only npm directly; add Job Object containment after Windows integration tests exist.
+                try:
+                    process.kill()
+                    termination_requests_sent.append("process.kill")
+                except OSError as exception:
+                    cleanup_signal_error = str(exception)
+
+        if cleanup_deadline is not None:
+            now = time.monotonic()
+            return_code = process.poll()
+            readers_stopped = all(not reader.is_alive() for reader in readers)
+
+            if is_posix:
+                process_group_status = _process_group_state(process_group_id)
+                if (
+                    termination_sent_at is not None
+                    and not force_kill_sent
+                    and now >= termination_sent_at + min(TERMINATE_GRACE_SECONDS, CLEANUP_TIMEOUT_SECONDS / 2)
+                    and now < cleanup_deadline
+                    and process_group_status != "absent"
+                ):
+                    kill_result = _signal_process_group(process_group_id, signal.SIGKILL)
+                    force_kill_sent = True
+                    if kill_result == "sent":
+                        termination_requests_sent.append("SIGKILL")
+                    if kill_result == "failed":
+                        cleanup_signal_error = "Could not send SIGKILL to the tracked process group"
+
+                if return_code is not None and readers_stopped and process_group_status == "absent":
+                    break
+            elif return_code is not None and readers_stopped:
+                break
+
+            remaining = cleanup_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            for reader in readers:
+                remaining = cleanup_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if reader.is_alive():
+                    reader.join(timeout=min(POLL_INTERVAL_SECONDS, remaining))
+            remaining = cleanup_deadline - time.monotonic()
+            if remaining > 0 and all(reader.is_alive() for reader in readers):
+                time.sleep(min(POLL_INTERVAL_SECONDS, remaining))
+        else:
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+    return_code = process.poll()
+    direct_process_reaped = return_code is not None
+    readers_stopped = all(not reader.is_alive() for reader in readers)
+    if is_posix:
+        process_group_status = _process_group_state(process_group_id)
+
+    if cleanup_deadline is None:
+        cleanup_status = "not_needed"
+    elif is_posix:
+        if not direct_process_reaped or not readers_stopped or process_group_status == "present":
+            cleanup_status = "incomplete"
+        elif process_group_status == "absent":
+            cleanup_status = "complete"
+        else:
+            cleanup_status = "uncertain"
+    elif not direct_process_reaped or not readers_stopped:
+        cleanup_status = "incomplete"
+    else:
+        cleanup_status = "uncertain"
+
+    cleanup = {
+        "status": cleanup_status,
+        "directProcessReaped": direct_process_reaped,
+        "outputReadersStopped": readers_stopped,
+        "trackedProcessGroup": process_group_status,
+        "terminationRequestsSent": termination_requests_sent,
+    }
+    if cleanup_signal_error:
+        cleanup["error"] = cleanup_signal_error
+
+    exit_code = return_code if return_code is not None and return_code >= 0 else None
+    signal_name = signal.Signals(-return_code).name if return_code is not None and return_code < 0 else None
+    if readers_stopped:
+        trimmed_stdout = trim_output(stdout.decode("utf-8", "replace"))
+        trimmed_stderr = trim_output(stderr.decode("utf-8", "replace"))
+        stdout_text = trimmed_stdout["text"]
+        stderr_text = trimmed_stderr["text"]
+        output_truncated = trimmed_stdout["truncated"] or trimmed_stderr["truncated"]
+    else:
+        stdout_text = ""
+        stderr_text = ""
+        output_truncated = True
     return {
         "command": "npm run --ignore-scripts " + name,
         "exitCode": exit_code,
         "signal": signal_name,
         "durationMs": int((time.monotonic() - started) * 1000),
         "error": error,
-        "stdout": trimmed_stdout["text"],
-        "stderr": trimmed_stderr["text"],
-        "outputTruncated": trimmed_stdout["truncated"] or trimmed_stderr["truncated"],
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+        "outputTruncated": output_truncated,
+        "cleanup": cleanup,
     }
 
 
 def execute_script(root, name, script, repository_fingerprint):
     result = _run_npm_script(root, name)
-    passed = result["error"] is None and result["exitCode"] == 0
+    command_passed = result["error"] is None and result["exitCode"] == 0
+    check_passed = command_passed and result["cleanup"]["status"] in ("not_needed", "complete")
     return {
         "name": name,
         "configuredCommand": script,
         **result,
         "repositoryFingerprint": repository_fingerprint,
-        "outcome": "passed" if passed else "failed",
+        "commandOutcome": "passed" if command_passed else "failed",
+        "outcome": "passed" if check_passed else "failed",
     }
 
 
@@ -240,14 +423,17 @@ def build_report(root, options):
     for name in selected:
         check = execute_script(root, name, scripts[name], before)
         executed.append(check)
-    after = snapshot(root) if selected else before
-    unchanged_during_checks = before == after if selected else None
+    cleanup_unresolved = any(check["cleanup"]["status"] in ("incomplete", "uncertain") for check in executed)
+    after = snapshot(root) if selected and not cleanup_unresolved else (before if not selected else None)
+    unchanged_during_checks = before == after if selected and not cleanup_unresolved else None
     all_passed = bool(executed) and all(check["outcome"] == "passed" for check in executed)
 
     status = "inventory_only"
     exit_code = 0
     if unavailable:
         status, exit_code = "selection_error", 2
+    elif cleanup_unresolved:
+        status, exit_code = "checks_failed", 1
     elif executed and not unchanged_during_checks:
         status, exit_code = "snapshot_changed", 1
     elif any(check["outcome"] != "passed" for check in executed):
@@ -283,6 +469,9 @@ def build_report(root, options):
                 "Coverage artifacts are listed by common path and are not interpreted.",
                 "Command output may contain sensitive data, is truncated at 20,000 characters per stream, and is printed to stdout only.",
                 "Commands have a 120-second timeout and 2 MB capture buffer; inspect error and truncation fields.",
+                f"After timeout, output overflow, runner SIGINT/SIGTERM, or incomplete process/output shutdown, termination and reader shutdown share one {CLEANUP_TIMEOUT_SECONDS}-second monotonic deadline. Each selected command can take up to its command timeout plus this cleanup budget.",
+                "Cleanup status describes observed scope: not_needed means cleanup was not triggered; on POSIX, complete means the direct process was reaped, readers stopped, and the tracked process group was absent. Neither establishes that descendants outside the group have terminated. Windows cleanup is best effort, and descendant termination is unconfirmed after a cleanup attempt.",
+                "If cleanup is incomplete or uncertain, the after-snapshot is omitted and unchangedDuringChecks is null.",
                 "The diff is summarized by changed paths and Git stat; inspect the actual patch separately.",
             ],
         },

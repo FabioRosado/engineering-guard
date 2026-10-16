@@ -1,7 +1,6 @@
 ---
 name: engineering-guard-align
 description: Challenge, refine, and approve repository-grounded architectural decisions through interactive discussion. Maintain a durable implementation plan under human control; never approve or implement it autonomously.
-
 ---
 
 # Engineering Guard Align
@@ -161,3 +160,43 @@ When the plan is approved, provide a concise handoff identifying:
 Do not start implementation automatically.
 
 Report the current status, material decisions changed, and any remaining questions without repeating the entire plan unnecessarily.
+
+## 8. Considered alternatives and decision rationale
+
+For substantive architectural decisions, preserve the
+alternatives genuinely evaluated during Research and Align.
+
+In decision records, present the proposed implementation
+approach first, followed by the decisions and alternatives
+that explain why it was recommended.
+
+For each meaningful alternative, record:
+
+- The approach and its intended benefits.
+- Its status: Proposed, Selected, Rejected, or Deferred.
+- Why it was recommended, selected, rejected, or deferred.
+- Relevant evidence and engineering trade-offs.
+- Important assumptions underlying the decision.
+- Conditions or new evidence that would justify revisiting it.
+
+Distinguish:
+
+- Proposed: Recommended but not yet approved by the developer.
+- Selected: Explicitly chosen by the developer.
+- Rejected: Unsuitable given current evidence or requirements.
+- Deferred: Potentially useful, but not justified or feasible now.
+
+Distinguish developer-approved individual decisions from
+approval of the complete implementation plan.
+
+Do not invent alternatives to satisfy a documentation quota.
+
+Preserve significant rejected alternatives so future developers
+and agents do not repeatedly propose approaches already
+evaluated without identifying new evidence.
+
+If new evidence invalidates an earlier rationale, flag it
+explicitly and return material decisions for human review.
+
+Keep this section concise. Document decision reasoning,
+not the entire investigation transcript.

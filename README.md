@@ -1,6 +1,6 @@
 # Engineering Guard v0.3
 
-Engineering Guard is a repository-local Codex PoC with seven independently invocable skills, reusable engineering policies, a pre-write policy-delivery hook, and a small verification evidence runner.
+Engineering Guard packages seven reusable Codex skills and a policy-delivery hook as a local Codex plugin. The repository also keeps its project-local setup, reusable policies, verification evidence runner, and demos.
 
 ## Use with Codex
 
@@ -14,7 +14,23 @@ Start Codex at the repository root, then invoke the skill that matches the work:
 - `$engineering-guard-align` discusses architecture and maintains a human-approved plan.
 - `$engineering-guard-security` performs an independent, read-only security review.
 
-Skills live in `.agents/skills/`; hook definitions are in `.codex/hooks.json`. Codex discovers skills from the repository-local directory. Trust the project through Codex's normal project flow, then review and trust its hooks with `/hooks`. The project does not change global Codex configuration. A changed hook definition needs review again.
+Skills live in `.agents/skills/`; project hook definitions are in `.codex/hooks.json`. Codex discovers skills from the repository-local directory. Trust the project through Codex's normal project flow, then review and trust its hooks with `/hooks`. A changed hook definition needs review again.
+
+### Install for personal Codex desktop use
+
+The local marketplace at `.agents/plugins/marketplace.json` exposes the repository root as the Engineering Guard plugin. From this repository root, register that marketplace once:
+
+```sh
+codex plugin marketplace add .
+```
+
+Restart Codex, open the Plugins Directory, select the Engineering Guard marketplace, and install the plugin. Review and trust its bundled hooks with `/hooks`; installing a plugin does not automatically trust its hooks. The plugin loads the skills and hook implementation from this repository package, so keep this checkout in place. After updating the checkout, refresh the marketplace and restart Codex:
+
+```sh
+codex plugin marketplace upgrade engineering-guard
+```
+
+The plugin's skills are available through supported local-marketplace clients. Its lifecycle hooks are supported for plugins installed manually in Codex desktop; this repository does not claim CLI hook support. The source repository disables the user-installed plugin in `.codex/config.toml` so its existing local skills and hook run without duplicates. Other repositories need no project-local plugin registration. To remove the plugin, uninstall or disable it in the Plugins Directory, then remove the marketplace with `codex plugin marketplace remove engineering-guard`.
 
 Python 3.9 or newer runs the hook and verification tools. Node.js 18 or newer and npm run the JavaScript demonstrations. No third-party Python or npm packages are required.
 
@@ -43,7 +59,11 @@ python3 scripts/verification_runner.py --run test --run demo:security
 
 The first command inventories without running checks. By default, scope compares the current worktree with `HEAD`; pass `--base <existing-ref>` for a broader branch comparison. Only explicitly selected root npm scripts execute; the runner disables automatic npm pre/post lifecycle scripts, but a selected script may invoke other commands and the runner is not a sandbox. Inspect scripts before running them. The JSON report goes to stdout and is not saved in the source tree. A nonzero check or a worktree change during execution returns a nonzero exit and marks the evidence failed or stale. Coverage artifacts are listed, not interpreted. Captured output may contain sensitive data; command output is capped, commands time out after 120 seconds, and the actual patch is not included in the report.
 
-The runner records execution evidence only. It does not judge test quality, implementation correctness, architecture, security, or whether selected checks are sufficient. Inspect the actual source paths and captured output. Do not treat a passing command as proof that the system works or is secure.
+Each executed check reports `commandOutcome` separately from `cleanup.status`; aggregate `outcome` is successful only when the command passed and cleanup is `not_needed` or `complete`. `not_needed` means cleanup was not triggered; it does not assert that every descendant is gone. `incomplete` means the direct process, a tracked POSIX process group, or an output reader remained active at the cleanup deadline. `uncertain` means the runner could not verify descendant cleanup, including after an attempted cleanup on Windows. On POSIX, `complete` means the direct process was reaped, output readers stopped, and the tracked process group was observed absent. It does not prove that descendants which escaped that group and closed their pipes have terminated. Signals sent are recorded as actions, not proof that processes exited. If any cleanup is incomplete or uncertain, the report omits the after-snapshot and sets `unchangedDuringChecks` to `null`.
+
+After timeout, output overflow, a runner `SIGINT`/`SIGTERM`, or a direct-process exit that leaves tracked processes or output readers active, termination, escalation, process reaping, and reader shutdown share one five-second monotonic cleanup deadline. A selected script can therefore take up to its 120-second command timeout plus this cleanup budget. An interrupt marks the command failed with `EINTR` and the runner reports the cleanup result. On POSIX the runner starts a new session and observes and terminates its process group, including members that remain after `npm` exits. This does not detect descendants that escape the group and close their pipes. On Windows the runner bounds direct-process termination and reader waiting, but descendant termination remains best effort and unverified; full Windows process-tree containment is not claimed.
+
+The runner records execution evidence only. It does not judge test quality, implementation correctness, architecture, security, or whether selected checks are sufficient. Inspect the actual source paths and captured output. Do not treat a passing command or a complete tracked-group cleanup observation as proof that the system works, is secure, or that every escaped descendant has terminated.
 
 ## Deterministic demonstrations
 
@@ -73,4 +93,4 @@ The verification runner can collect repeatable command evidence for manual or mo
 
 ## Scope
 
-This PoC uses repository-local `.codex/`, `.agents/skills/`, policies, scripts, and demos. It adds no dependency, server, MCP integration, or full plugin package, and does not modify global Codex configuration. Full plugin packaging is deferred until distribution beyond this repository is needed.
+Engineering Guard remains a local Codex package with repository-local skills, policies, hooks, scripts, and demos. It adds no dependency, server, or MCP integration. Registering the marketplace with `codex plugin marketplace add .` stores a user-level Codex source that points to this checkout; installing and trusting the plugin remain explicit desktop actions. The verification runner and demos remain repository-local.

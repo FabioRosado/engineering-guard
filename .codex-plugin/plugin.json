@@ -1,0 +1,23 @@
+{
+  "name": "engineering-guard",
+  "version": "0.3.0",
+  "description": "Reusable engineering skills and policy delivery for Codex.",
+  "author": {
+    "name": "Engineering Guard"
+  },
+  "skills": "./.agents/skills/",
+  "interface": {
+    "displayName": "Engineering Guard",
+    "shortDescription": "Codex engineering workflows",
+    "longDescription": "Seven reusable engineering skills and a policy-delivery hook for Codex. Verification tools and demos remain repository-local.",
+    "developerName": "Engineering Guard",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Engineering workflows",
+      "Policy delivery"
+    ],
+    "composerIcon": "./assets/engineering-guard.svg",
+    "logo": "./assets/engineering-guard.svg"
+  },
+  "hooks": "./hooks/hooks.json"
+}

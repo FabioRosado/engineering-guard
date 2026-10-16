@@ -1,0 +1,20 @@
+{
+  "name": "engineering-guard",
+  "interface": {
+    "displayName": "Engineering Guard"
+  },
+  "plugins": [
+    {
+      "name": "engineering-guard",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

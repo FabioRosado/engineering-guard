@@ -11,6 +11,8 @@ Act as a critical software architect. Understand the existing system before prop
 
 This skill is read-only by default. Do not modify application code, tests, configuration, or infrastructure. Do not implement recommendations or approve architectural decisions.
 
+For each meaningful alternative, record the reason it is recommended, rejected or deferred, including the assumptions and evidence behind that judgement. Preserve this reasoning for Align rather than presenting only the preferred solution.
+
 ## 1. Establish the objective
 
 Identify:

@@ -1,7 +1,10 @@
 import json
+import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -48,6 +51,35 @@ class VerificationRunnerTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=30,
+        )
+        return result, json.loads(result.stdout)
+
+    def run_runner_with_limits(self, root, command_timeout, cleanup_timeout, terminate_grace, *args):
+        # Exercise the real CLI and npm subprocesses with shorter deadlines for deterministic tests.
+        harness = (
+            "import importlib.util, sys; "
+            "spec = importlib.util.spec_from_file_location('runner_under_test', sys.argv[1]); "
+            "runner = importlib.util.module_from_spec(spec); spec.loader.exec_module(runner); "
+            "runner.TIMEOUT_SECONDS = float(sys.argv[2]); "
+            "runner.CLEANUP_TIMEOUT_SECONDS = float(sys.argv[3]); "
+            "runner.TERMINATE_GRACE_SECONDS = float(sys.argv[4]); "
+            "sys.exit(runner.main(sys.argv[5:]))"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                harness,
+                str(RUNNER_SCRIPT),
+                str(command_timeout),
+                str(cleanup_timeout),
+                str(terminate_grace),
+                *args,
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result, json.loads(result.stdout)
 
@@ -115,6 +147,8 @@ class VerificationRunnerTests(unittest.TestCase):
         self.assertEqual(report["checks"]["notRequested"], ["pretest", "lint"])
         check = report["checks"]["executed"][0]
         self.assertEqual(check["command"], "npm run --ignore-scripts test")
+        self.assertEqual(check["commandOutcome"], "passed")
+        self.assertEqual(check["cleanup"]["status"], "not_needed")
         self.assertEqual(check["repositoryFingerprint"], report["repository"]["snapshot"]["before"])
         self.assertIn("tests passed", check["stdout"])
         self.assertEqual(report["coverageEvidence"], [{"path": "coverage/lcov.info", "sizeBytes": 4}])
@@ -132,6 +166,7 @@ class VerificationRunnerTests(unittest.TestCase):
         self.assertEqual(report["status"], "checks_failed")
         self.assertFalse(report["checks"]["allPassed"])
         self.assertEqual(report["checks"]["executed"][0]["exitCode"], 7)
+        self.assertEqual(report["checks"]["executed"][0]["commandOutcome"], "failed")
         self.assertIn("intentional failure", report["checks"]["executed"][0]["stderr"])
 
     def test_passing_check_that_changes_source_is_reported_stale(self):
@@ -170,7 +205,275 @@ class VerificationRunnerTests(unittest.TestCase):
         check = report["checks"]["executed"][0]
         self.assertEqual(report["status"], "checks_failed")
         self.assertEqual(check["error"]["code"], "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+        self.assertEqual(check["commandOutcome"], "failed")
         self.assertLessEqual(len(check["stdout"]), 20_000)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup contract")
+    def test_output_overflow_escalates_and_reaps_remaining_process_group(self):
+        root = self.create_repository(
+            {"test": "python3 overflow_parent.py"},
+            {
+                ".gitignore": "child.pid\nchild.ready\n",
+                "overflow_parent.py": (
+                    "import subprocess\n"
+                    "import sys\n"
+                    "import time\n"
+                    "from pathlib import Path\n"
+                    "child = subprocess.Popen([sys.executable, '-c', \"import signal, time; from pathlib import Path; signal.signal(signal.SIGTERM, signal.SIG_IGN); Path('child.ready').touch(); time.sleep(60)\"])\n"
+                    "Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+                    "for _ in range(300):\n"
+                    "    if Path('child.ready').exists():\n"
+                    "        break\n"
+                    "    time.sleep(0.01)\n"
+                    "else:\n"
+                    "    raise RuntimeError('child did not become ready')\n"
+                    "sys.stdout.write('x' * (3 * 1024 * 1024))\n"
+                    "sys.stdout.flush()\n"
+                ),
+            },
+        )
+        child_pid = None
+        try:
+            result, report = self.run_runner_with_limits(root, 3, 0.8, 0.2, "--run", "test")
+            check = report["checks"]["executed"][0]
+            child_pid = int((root / "child.pid").read_text(encoding="utf-8"))
+
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            self.assertEqual(report["status"], "checks_failed")
+            self.assertFalse(report["checks"]["allPassed"])
+            self.assertEqual(check["error"]["code"], "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+            self.assertEqual(check["commandOutcome"], "failed")
+            self.assertEqual(check["cleanup"]["status"], "complete")
+            self.assertTrue(check["cleanup"]["directProcessReaped"])
+            self.assertTrue(check["cleanup"]["outputReadersStopped"])
+            self.assertEqual(check["cleanup"]["trackedProcessGroup"], "absent")
+            self.assertEqual(check["cleanup"]["terminationRequestsSent"], ["SIGTERM", "SIGKILL"])
+            self.assertLess(check["durationMs"], 2_200)
+            self.assertLessEqual(len(check["stdout"]), 20_000)
+        finally:
+            if child_pid is None and (root / "child.pid").exists():
+                child_pid = int((root / "child.pid").read_text(encoding="utf-8"))
+            if child_pid is not None:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup contract")
+    def test_timeout_escalates_for_a_process_that_ignores_sigterm_within_one_cleanup_budget(self):
+        root = self.create_repository(
+            {"test": 'node -e "process.on(\'SIGTERM\', () => {}); setInterval(() => {}, 1000)"'}
+        )
+
+        result, report = self.run_runner_with_limits(root, 0.4, 0.8, 0.2, "--run", "test")
+
+        check = report["checks"]["executed"][0]
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(report["status"], "checks_failed")
+        self.assertEqual(check["error"]["code"], "ETIMEDOUT")
+        self.assertEqual(check["commandOutcome"], "failed")
+        self.assertEqual(check["cleanup"]["status"], "complete")
+        self.assertTrue(check["cleanup"]["directProcessReaped"])
+        self.assertTrue(check["cleanup"]["outputReadersStopped"])
+        self.assertEqual(check["cleanup"]["trackedProcessGroup"], "absent")
+        self.assertEqual(check["cleanup"]["terminationRequestsSent"], ["SIGTERM", "SIGKILL"])
+        self.assertLessEqual(check["durationMs"], 1_700)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup contract")
+    def test_terminal_interrupt_cleans_up_the_selected_process_group(self):
+        for interrupt_signal in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signal.Signals(interrupt_signal).name):
+                self.assert_runner_signal_cleans_up_process_group(interrupt_signal)
+
+    def assert_runner_signal_cleans_up_process_group(self, interrupt_signal):
+        root = self.create_repository(
+            {"test": "python3 wait_for_interrupt.py"},
+            {
+                ".gitignore": "process.pid\nprocess.pgid\nprocess.ready\n",
+                "wait_for_interrupt.py": (
+                    "import os\n"
+                    "import signal\n"
+                    "import time\n"
+                    "from pathlib import Path\n"
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    "Path('process.pid').write_text(str(os.getpid()), encoding='utf-8')\n"
+                    "Path('process.pgid').write_text(str(os.getpgrp()), encoding='utf-8')\n"
+                    "Path('process.ready').touch()\n"
+                    "time.sleep(60)\n"
+                ),
+            },
+        )
+        runner = subprocess.Popen(
+            [sys.executable, str(RUNNER_SCRIPT), "--run", "test"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        command_group = None
+        try:
+            ready_path = root / "process.ready"
+            startup_deadline = time.monotonic() + 10
+            while not ready_path.exists() and runner.poll() is None and time.monotonic() < startup_deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready_path.exists(), "selected command did not reach its ready state")
+            command_pid = int((root / "process.pid").read_text(encoding="utf-8"))
+            command_group = int((root / "process.pgid").read_text(encoding="utf-8"))
+
+            # SIGINT to this group models terminal Ctrl-C; SIGTERM follows the same cleanup path.
+            os.killpg(runner.pid, interrupt_signal)
+            stdout, stderr = runner.communicate(timeout=10)
+            self.assertEqual(runner.returncode, 1, stderr + stdout)
+            report = json.loads(stdout)
+            check = report["checks"]["executed"][0]
+
+            self.assertEqual(report["status"], "checks_failed")
+            self.assertFalse(report["checks"]["allPassed"])
+            self.assertEqual(check["error"]["code"], "EINTR")
+            self.assertEqual(check["commandOutcome"], "failed")
+            self.assertEqual(check["cleanup"]["status"], "complete")
+            self.assertTrue(check["cleanup"]["directProcessReaped"])
+            self.assertTrue(check["cleanup"]["outputReadersStopped"])
+            self.assertEqual(check["cleanup"]["trackedProcessGroup"], "absent")
+            self.assertEqual(check["cleanup"]["terminationRequestsSent"], ["SIGTERM", "SIGKILL"])
+            self.assertLess(check["durationMs"], 6_500)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(command_pid, 0)
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(command_group, 0)
+        finally:
+            if runner.poll() is None:
+                try:
+                    os.killpg(runner.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                runner.wait(timeout=5)
+            if command_group is not None:
+                try:
+                    os.killpg(command_group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if runner.stdout:
+                runner.stdout.close()
+            if runner.stderr:
+                runner.stderr.close()
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup contract")
+    def test_remaining_group_is_escalated_after_npm_leader_exits(self):
+        root = self.create_repository(
+            {"test": "python3 spawn_child.py"},
+            {
+                ".gitignore": "child.pid\nchild.ready\n",
+                "spawn_child.py": (
+                    "import subprocess\n"
+                    "import sys\n"
+                    "import time\n"
+                    "from pathlib import Path\n"
+                    "child = subprocess.Popen([sys.executable, '-c', \"import signal, time; from pathlib import Path; signal.signal(signal.SIGTERM, signal.SIG_IGN); Path('child.ready').touch(); time.sleep(60)\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+                    "Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+                    "for _ in range(300):\n"
+                    "    if Path('child.ready').exists():\n"
+                    "        break\n"
+                    "    time.sleep(0.01)\n"
+                    "else:\n"
+                    "    raise RuntimeError('child did not become ready')\n"
+                )
+            },
+        )
+
+        child_pid = None
+        try:
+            result, report = self.run_runner_with_limits(root, 3, 0.8, 0.2, "--run", "test")
+
+            check = report["checks"]["executed"][0]
+            child_pid = int((root / "child.pid").read_text(encoding="utf-8"))
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(check["commandOutcome"], "passed")
+            self.assertEqual(check["cleanup"]["status"], "complete")
+            self.assertEqual(check["cleanup"]["trackedProcessGroup"], "absent")
+            try:
+                child_group = os.getpgid(child_pid)
+            except ProcessLookupError:
+                child_group = None
+            self.assertEqual(
+                check["cleanup"]["terminationRequestsSent"],
+                ["SIGTERM", "SIGKILL"],
+                f"cleanup={check['cleanup']}, surviving_child_group={child_group}",
+            )
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
+        finally:
+            if child_pid is None and (root / "child.pid").exists():
+                child_pid = int((root / "child.pid").read_text(encoding="utf-8"))
+            if child_pid is not None:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup contract")
+    def test_successful_group_signal_does_not_claim_escaped_descendant_cleanup(self):
+        root = self.create_repository(
+            {"test": "python3 spawn_parent.py"},
+            {
+                ".gitignore": "child.pid\nchild.ready\nescaped.pid\n",
+                "spawn_parent.py": (
+                    "import subprocess\n"
+                    "import sys\n"
+                    "import time\n"
+                    "from pathlib import Path\n"
+                    "child = subprocess.Popen([sys.executable, 'wait_and_escape.py'])\n"
+                    "for _ in range(300):\n"
+                    "    if Path('child.ready').exists():\n"
+                    "        break\n"
+                    "    time.sleep(0.01)\n"
+                    "else:\n"
+                    "    raise RuntimeError('child did not become ready')\n"
+                    "Path('child.pid').write_text(str(child.pid), encoding='utf-8')\n"
+                ),
+                "wait_and_escape.py": (
+                    "import signal\n"
+                    "import subprocess\n"
+                    "import sys\n"
+                    "import time\n"
+                    "from pathlib import Path\n"
+                    "def escape(_signum, _frame):\n"
+                    "    subprocess.Popen([sys.executable, '-c', \"import os, time; from pathlib import Path; Path('escaped.pid').write_text(str(os.getpid()), encoding='utf-8'); time.sleep(60)\"], start_new_session=True, stdin=subprocess.DEVNULL)\n"
+                    "    raise SystemExit(0)\n"
+                    "signal.signal(signal.SIGTERM, escape)\n"
+                    "Path('child.ready').touch()\n"
+                    "time.sleep(60)\n"
+                )
+            },
+        )
+        escaped_pid = None
+        try:
+            result, report = self.run_runner_with_limits(root, 3, 0.5, 0.2, "--run", "test")
+            check = report["checks"]["executed"][0]
+            escaped_pid = int((root / "escaped.pid").read_text(encoding="utf-8"))
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(check["commandOutcome"], "passed")
+            self.assertEqual(check["outcome"], "failed")
+            self.assertEqual(check["cleanup"]["status"], "incomplete")
+            self.assertTrue(check["cleanup"]["directProcessReaped"])
+            self.assertFalse(check["cleanup"]["outputReadersStopped"])
+            self.assertEqual(check["cleanup"]["trackedProcessGroup"], "absent")
+            self.assertEqual(check["cleanup"]["terminationRequestsSent"], ["SIGTERM"])
+            self.assertLess(check["durationMs"], 2_000)
+            self.assertIsNone(report["repository"]["snapshot"]["after"])
+            self.assertIsNone(report["repository"]["snapshot"]["unchangedDuringChecks"])
+            self.assertEqual(report["status"], "checks_failed")
+            self.assertFalse(report["checks"]["allPassed"])
+        finally:
+            if escaped_pid is None and (root / "escaped.pid").exists():
+                escaped_pid = int((root / "escaped.pid").read_text(encoding="utf-8"))
+            if escaped_pid is not None:
+                try:
+                    os.kill(escaped_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 if __name__ == "__main__":
