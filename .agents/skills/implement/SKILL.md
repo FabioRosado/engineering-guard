@@ -124,6 +124,26 @@ concept or improve comprehension.
 Prefer the existing architecture unless there is a justified
 reason to change it.
 
+When a recognized design pattern or refactoring technique materially
+shapes the change, name it in the implementation summary and explain
+the responsibility, coupling, or change-cost problem it addresses.
+Use a pattern only when its structure fits the real requirement; do
+not add pattern-name comments merely to label familiar constructs.
+When the pattern choice is consequential or non-obvious, add a brief
+nearby code comment naming it and explaining why it fits, rather than
+stating only the pattern name. For example:
+
+```js
+// Strategy: keep format-specific rendering out of the shared export flow.
+const formatter = formatters[requestedFormat];
+```
+
+For refactoring, identify the concrete code smell or change pressure
+and the behavior that must remain unchanged; name the transformation
+in the code comment when that rationale would not be clear from the
+resulting code. Add no comment when the code already makes the reason
+obvious.
+
 ### Clear behaviour
 
 Make error handling explicit and consistent with project conventions.

@@ -53,6 +53,17 @@ Trace actual behaviour rather than relying solely on filenames, interfaces, docu
 
 Inspect how components interact, especially across application and infrastructure boundaries.
 
+When an established design pattern or architectural style materially
+explains the code, name it and cite the concrete responsibilities or
+collaborations that support that classification. Treat the name as a
+description, not proof of quality. For proposed refactoring, identify
+the current code smell or change pressure, describe the transformation
+and its behavioral safeguards, and explain why a named refactoring or
+pattern fits better than a simpler local change. If the choice is
+consequential or non-obvious, recommend a concise source comment that
+names the pattern and rationale; do not recommend labels for familiar,
+self-explanatory constructs. Omit pattern names when they add no value.
+
 For bugs, distinguish symptoms from possible root causes. Seek reproduction or measurable evidence when practical and safe.
 
 For performance concerns, identify existing measurements and bottlenecks before recommending optimisation.
@@ -124,6 +135,9 @@ Explain:
 - Which trade-offs it accepts.
 - What conditions would favour another approach.
 - What evidence could change the recommendation.
+- Which established patterns or refactoring techniques, if any, are
+  being retained, changed, or introduced, and what concrete problem
+  justifies that choice.
 
 Do not automatically favour the most extensible, abstract, or technically sophisticated design.
 
