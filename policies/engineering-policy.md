@@ -46,6 +46,10 @@ minimum line counts, or unnecessary architectural sophistication.
   observable behaviour unless a change is explicitly required.
 - Handle errors explicitly and consistently with project
   conventions. Do not swallow failures or fabricate success.
+- Distinguish invalid input from dependency and internal failures;
+  do not misclassify an outage as a client error.
+- Make partial results explicit when a complete result was promised;
+  do not report incomplete work as unqualified success.
 - Preserve useful error information and document important
   failure behaviour when the code cannot make it clear.
 - Prefer understandable, predictable behaviour over hidden

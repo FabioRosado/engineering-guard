@@ -135,7 +135,13 @@ Never present an agent recommendation as an approved architectural decision.
 
 ## 6. Prepare the Align handoff
 
-Produce a concise architecture research report containing:
+For a straightforward question or localized issue with one clear
+approach, use a short answer: relevant evidence, recommendation,
+and any material uncertainty. Use the structured handoff below
+for substantive architectural decisions or when Align needs to
+preserve trade-offs across sessions. Include only relevant sections.
+
+When a structured handoff is warranted, cover:
 
 ### Objective
 
@@ -176,6 +182,9 @@ Keep Research independent from implementation and approval.
 Save a concise report only when the developer asks to preserve it, using an existing project convention where available.
 
 Mark recommendations as proposals, not approved decisions.
+If preserving research in a decision-record location, label the
+record explicitly as an unapproved Research proposal. Its path
+does not imply approval; Align may revise that same record.
 
 Ensure `$engineering-guard-align` can continue from the report without repeating completed investigation.
 

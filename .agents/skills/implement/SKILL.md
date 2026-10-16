@@ -35,8 +35,11 @@ Keep investigation proportional to the task.
 Do not demand a separate Research or Align phase for
 straightforward changes.
 
-When an explicitly approved decision record exists, follow
-its architecture, constraints, and acceptance criteria.
+Look for applicable decision records proportionately to the change.
+When an explicitly approved record exists, check that the approved
+revision is current and relevant, then follow its architecture,
+constraints, and acceptance criteria. Flag stale or conflicting
+decisions rather than silently adopting them.
 
 A Research recommendation or draft decision is not approval.
 
@@ -124,6 +127,8 @@ reason to change it.
 ### Clear behaviour
 
 Make error handling explicit and consistent with project conventions.
+Distinguish invalid input from dependency or internal failures;
+do not present an outage as a client error.
 
 Do not silently swallow failures, fabricate successful fallbacks,
 or hide unexpected states.
@@ -132,6 +137,57 @@ Preserve data integrity, relevant invariants, and established
 security boundaries.
 
 Avoid unrelated refactoring or unnecessary dependencies.
+
+### Resource and integration boundaries
+
+When adding a long-lived resource, identify who owns it and
+where it is closed. Check both normal shutdown and failure
+during startup after some resources have already opened.
+
+For example, if initialization fails after a connection opens,
+close it before propagating the failure:
+
+```js
+async function startIndex(openConnection, loadIndex) {
+  const connection = await openConnection();
+  try {
+    const index = await loadIndex(connection);
+    return { index, close: () => connection.close() };
+  } catch (error) {
+    try {
+      await connection.close();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Index startup and cleanup failed');
+    }
+    throw error;
+  }
+}
+```
+
+The aggregate preserves both failures when cleanup also fails;
+adapt its reporting to the application's established error contract.
+
+For work spanning a database, queue, remote API, or other
+independent systems, inspect the order of effects and what
+happens when each step fails. Define whether partial work is
+retriable, compensatable, or must be reported as incomplete;
+check idempotency before recommending a retry. For example:
+
+```js
+async function saveAndNotify(record, save, notify) {
+  await save(record);
+  try {
+    await notify(record);
+  } catch (error) {
+    throw new Error('Record saved; notification failed', { cause: error });
+  }
+}
+```
+
+This example reports partial work rather than claiming full
+success; it does not establish a retry or transaction strategy.
+Choose recovery according to the actual contract, not a
+mandatory outbox or compensating-action pattern.
 
 ## 4. Implement in coherent increments
 
@@ -171,6 +227,11 @@ For bug fixes, demonstrate that an appropriate regression test
 detects the original failure when practical.
 
 Cover relevant success, failure, boundary, and regression cases.
+
+Where effects span systems, test the failure window after the
+first effect and assert both the reported outcome and the
+remaining state or side effects. For resource startup, test
+cleanup when a later initialization step fails.
 
 Never weaken assertions, replace real behaviour with mocks,
 or alter production contracts merely to make tests pass.

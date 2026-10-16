@@ -28,6 +28,10 @@ def fingerprint_working_tree(cwd=None):
         path for path in git(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], root).split("\0") if path
     )
     digest = hashlib.sha256(f"HEAD\0{revision}\0".encode("utf-8", "surrogateescape"))
+    index = subprocess.run(["git", "ls-files", "--stage", "-z"], cwd=root, capture_output=True)
+    if index.returncode != 0:
+        raise RuntimeError(index.stderr.decode("utf-8", "replace").strip() or "Could not read Git index")
+    digest.update(b"INDEX\0" + index.stdout + b"\0")
 
     for relative_path in paths:
         path = root / relative_path

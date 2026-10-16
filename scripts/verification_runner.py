@@ -93,6 +93,9 @@ def changed_files(root, baseline):
         entries = [entry for entry in git(["diff", "--no-ext-diff", "--no-renames", "--name-status", "-z", baseline, "--"], root).split("\0") if entry]
         for index in range(0, len(entries), 2):
             files[entries[index + 1]] = entries[index]
+        staged = [entry for entry in git(["diff", "--cached", "--no-ext-diff", "--no-renames", "--name-status", "-z", baseline, "--"], root).split("\0") if entry]
+        for index in range(0, len(staged), 2):
+            files.setdefault(staged[index + 1], staged[index])
     else:
         entries = [entry for entry in git(["status", "--porcelain=v1", "--no-renames", "--untracked-files=all", "-z"], root).split("\0") if entry]
         for entry in entries:
@@ -420,12 +423,26 @@ def build_report(root, options):
     changed = changed_files(root, baseline)
     before = snapshot(root)
     executed = []
+    current = before
+    changed_during_checks = False
     for name in selected:
-        check = execute_script(root, name, scripts[name], before)
+        check_before = snapshot(root) if current is not None else None
+        if current is not None:
+            changed_during_checks |= check_before != current
+        check = execute_script(root, name, scripts[name], check_before)
+        if check["cleanup"]["status"] in ("incomplete", "uncertain"):
+            current = None
+        elif current is not None:
+            after_check = snapshot(root)
+            check["snapshotAfter"] = after_check
+            changed_during_checks |= after_check != check_before
+            current = after_check
         executed.append(check)
     cleanup_unresolved = any(check["cleanup"]["status"] in ("incomplete", "uncertain") for check in executed)
     after = snapshot(root) if selected and not cleanup_unresolved else (before if not selected else None)
-    unchanged_during_checks = before == after if selected and not cleanup_unresolved else None
+    if after is not None and current is not None:
+        changed_during_checks |= after != current
+    unchanged_during_checks = not changed_during_checks and before == after if selected and not cleanup_unresolved else None
     all_passed = bool(executed) and all(check["outcome"] == "passed" for check in executed)
 
     status = "inventory_only"

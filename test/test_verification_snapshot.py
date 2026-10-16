@@ -65,6 +65,14 @@ class VerificationSnapshotTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertRegex(output["fingerprint"], r"^[a-f0-9]{64}$")
 
+    def test_staged_content_changes_fingerprint_without_worktree_change(self):
+        source = self.fixture_root / "src" / "handler.mjs"
+        initial = self.check_snapshot()[1]["fingerprint"]
+        source.write_text("export const value = 2;\n", encoding="utf-8")
+        subprocess.run(["git", "add", "src/handler.mjs"], cwd=self.fixture_root, check=True)
+        source.write_text("export const value = 1;\n", encoding="utf-8")
+        self.assertNotEqual(initial, self.check_snapshot()[1]["fingerprint"])
+
     def test_symlink_target_is_included_in_fingerprint(self):
         link = self.fixture_root / "src" / "current"
         link.symlink_to("handler.mjs")

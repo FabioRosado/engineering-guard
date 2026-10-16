@@ -29,7 +29,10 @@ For planning and audit-only requests, remain read-only.
 Do not modify tests or production code without authorisation.
 
 Read applicable repository instructions, the Engineering Guard
-testing policy, and the project constitution when present.
+testing policy, relevant decision records, and the project
+constitution when present. Check the applicable revision and
+approval status before treating a decision as a test contract;
+Research proposals and drafts are not approved requirements.
 
 Do not require Spec Kit.
 
@@ -152,6 +155,10 @@ For bug fixes, when practical:
 3. Demonstrate that it fails for the original defect.
 4. Apply or coordinate the authorised fix.
 5. Demonstrate that the regression test passes afterward.
+
+For a tests-only task, report the demonstrated production failure
+without changing production code unless that fix was also requested.
+Do not claim the final passing step if it has not occurred.
 
 Verify that an expected failure occurs for the intended
 reason, not merely because a command exited unsuccessfully.

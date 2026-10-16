@@ -50,8 +50,10 @@ Use only the guidance relevant to the request:
 
 ## Ask only when needed
 
-Ask a focused question when a missing decision materially changes correctness, security, product behavior, or scope and cannot be safely resolved through investigation. Otherwise produce the best prompt and label consequential assumptions or ask the coding agent to establish them before implementation. Do not fabricate acceptance criteria to make the brief look complete.
+Better Prompt owns clarification needed to produce a safe, actionable prompt. If a missing decision materially changes correctness, security, product behavior, or scope and cannot be resolved from the supplied context, ask the developer before writing the prompt. Do not hide a decision that requires the developer's authority inside instructions for the next agent.
+
+If repository investigation can resolve the uncertainty, or the next agent can safely investigate before implementation, produce the prompt and direct that agent to do so. Label assumptions and require the next agent to return for a decision if material uncertainty remains. Do not fabricate acceptance criteria to make the brief look complete.
 
 ## Output
 
-Return the finished prompt in a copy-ready code block, with a brief Quick or Thorough label when useful. Preserve the developer's voice and explicit instructions. Prefer concrete actions and observable outcomes over generic phrases such as “write clean code”. Do not add lengthy commentary, force a fixed template, or automatically invoke Research, Implement, Testing, Verify, or any other mode. Consult `demo/scenarios/better-prompt-examples.md` when an example would clarify the transformation.
+Return the finished prompt in a copy-ready code block, with a brief Quick or Thorough label when useful. Preserve the developer's voice and explicit instructions. Prefer concrete actions and observable outcomes over generic phrases such as “write clean code”. Do not add lengthy commentary, force a fixed template, or automatically invoke Research, Implement, Testing, Verify, or any other mode. If accessible, consult the optional `demo/scenarios/better-prompt-examples.md` in the Engineering Guard package root when an example would clarify the transformation; the skill must work without that file.

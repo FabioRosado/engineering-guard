@@ -1,6 +1,6 @@
 ---
 name: engineering-guard-security
-description: Independently review code, diffs, features, and architecture for security vulnerabilities. Trace real trust boundaries, validate findings against evidence, and report actionable risks without modifying the implementation.
+description: Independently review code, diffs, features, and architecture for security vulnerabilities and preventive design controls. Trace real trust boundaries, validate findings against evidence, and report actionable risks without modifying the implementation.
 ---
 
 # Engineering Guard — Security
@@ -14,6 +14,12 @@ generic vulnerability checklist or automated scanner.
 
 Identify realistic security weaknesses, explain their impact,
 and distinguish confirmed vulnerabilities from possible risks.
+
+Look for opportunities to establish secure defaults before an
+implementation hardens around unsafe assumptions. Recommend
+preventive design choices as well as defects in existing code,
+without presenting unimplemented design risks as confirmed
+vulnerabilities.
 
 This skill is read-only by default. Do not modify application
 code, tests, configuration, dependencies, or infrastructure.
@@ -80,7 +86,36 @@ requested resource, and ownership or permission decision.
 
 Do not invent attack paths unsupported by the architecture.
 
-## 3. Apply relevant security guidance
+## 3. Recommend secure designs early
+
+For feature, architecture, or pre-implementation reviews, identify
+the security properties the design needs to preserve and recommend
+controls at the boundary where they are most effective. Consider,
+when relevant:
+
+- Deny-by-default authorization and least-privilege identities.
+- Narrow trust boundaries and reduced exposed functionality.
+- Data minimization, explicit retention, and safe handling of
+  secrets and personal data.
+- Allowlisted input constraints and context-appropriate output
+  encoding or parameterized APIs.
+- Fail-closed behavior for security decisions, without turning
+  unrelated dependency outages into misleading client errors.
+- Bounded resource use, abuse controls, and safe retry or replay
+  behavior.
+- Auditable security decisions without logging credentials or
+  sensitive values.
+
+Tie each recommendation to the actual threat, boundary, and
+failure mode. Prefer a small number of effective controls over
+adding layers or security products without demonstrated value.
+State assumptions and trade-offs, and identify tests or other
+evidence that would verify the control. Security review remains
+read-only; recommendations do not authorize implementation.
+
+Do not require this design analysis for unrelated low-risk changes.
+
+## 4. Apply relevant security guidance
 
 Select risks according to the actual system and threat model.
 
@@ -118,7 +153,13 @@ Do not turn these references into a mandatory checklist for
 every change. A small frontend update does not require a
 complete infrastructure security audit.
 
-## 4. Validate potential vulnerabilities
+Use these sources as ways to discover relevant threats and
+controls, not as the complete universe of security guidance.
+Account for application-specific assets, abuse cases, trust
+boundaries, platform behavior, and operational failure modes
+that a generic taxonomy may not capture.
+
+## 5. Validate potential vulnerabilities
 
 Investigate suspicious patterns before reporting them
 as confirmed vulnerabilities.
@@ -155,7 +196,7 @@ State the evidence and limitations of static reasoning.
 
 Do not fabricate proof-of-concept results.
 
-## 5. Use security tools appropriately
+## 6. Use security tools appropriately
 
 Inspect existing project security tooling and available
 local checks before introducing alternatives.
@@ -193,7 +234,7 @@ report the limitation rather than simulating a result.
 
 A clean scanner result is not proof of security.
 
-## 6. Assess severity and confidence
+## 7. Assess severity and confidence
 
 Prioritise confirmed and actionable risks.
 
@@ -218,7 +259,7 @@ make the severity conditional and explain why.
 
 Avoid presenting hypothetical risks as established exploits.
 
-## 7. Recommend meaningful security verification
+## 8. Recommend meaningful security verification
 
 For each actionable vulnerability, recommend a focused
 remediation and appropriate regression test.
@@ -244,7 +285,7 @@ project tests or production code during the review.
 Do not claim a regression is covered unless the corresponding
 test was inspected or executed with appropriate evidence.
 
-## 8. Report findings
+## 9. Report findings
 
 Present actionable findings in severity order.
 
@@ -260,6 +301,8 @@ For each finding, provide:
 - Relevant OWASP/CWE mapping when justified.
 - Focused remediation.
 - Recommended security regression test.
+- For pre-implementation reviews, preventive design controls,
+  assumptions, and the evidence needed to validate them.
 
 For architecture reviews, reference the affected components
 or design decisions when source locations do not exist.
@@ -272,7 +315,7 @@ tool warnings, and optional hardening advice.
 Prioritise the most important actionable problems rather
 than generating a long list of generic recommendations.
 
-## 9. Conclude the assessment
+## 10. Conclude the assessment
 
 Summarise:
 

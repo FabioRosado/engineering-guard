@@ -42,15 +42,15 @@ Python 3.9 or newer runs the hook and verification tools. Node.js 18 or newer an
 - `SessionStart` after compaction or resume restores policies already delivered to that session. Content digests invalidate stale acknowledgements.
 - The hook never approves a write. It enforces policy availability, not policy compliance or code quality.
 
-`PreToolUse` classifies Codex `tool_name` and `tool_input.command` for Bash and `apply_patch`, recognizing common Python and JavaScript/TypeScript test names and code extensions. Bash path parsing is heuristic: computed paths and interactive commands continued through `write_stdin` are not re-intercepted. MCP or specialized write tools and edits outside the covered paths can bypass the hook. Skills and policies remain advisory.
+`PreToolUse` classifies Codex `tool_name` and `tool_input.command` for Bash and `apply_patch`, recognizing common Python and JavaScript/TypeScript test names, pytest support files, and code extensions. Bash path parsing is heuristic: computed paths and interactive commands continued through `write_stdin` are not re-intercepted. MCP or specialized write tools and edits outside the covered paths can bypass the hook. The separate security policy is not automatically delivered for security-sensitive changes. Skills and policies remain advisory.
 
 The hook uses `SessionStart` for restoration because Codex emits it with source `compact` after compaction. There is no Stop hook: Codex does not support a Stop matcher, and a blocking Stop can create an automatic continuation prompt. Verify remains explicit and read-only.
 
 ## Verification evidence
 
-`python3 scripts/verification_snapshot.py` prints the current worktree fingerprint and reports that prior evidence is missing. Pass a saved fingerprint to classify it as `current` or `stale`. The fingerprint includes `HEAD`, tracked files, and non-ignored untracked files. It does not prove that tests ran or that a human approved a result.
+`python3 scripts/verification_snapshot.py` prints the current worktree fingerprint and reports that prior evidence is missing. Pass a saved fingerprint to classify it as `current` or `stale`. The fingerprint includes `HEAD`, staged index entries, tracked files, and non-ignored untracked files. It does not prove that tests ran or that a human approved a result.
 
-`scripts/verification_runner.py` reuses that snapshot utility to report the Git baseline, changed-file scope, available root npm scripts, command results, common coverage artifact paths, and before/after fingerprints:
+`scripts/verification_runner.py` reuses that snapshot utility to report the Git baseline, changed-file scope, available root npm scripts, command results, common coverage artifact paths, and fingerprints before and after each selected check:
 
 ```sh
 python3 scripts/verification_runner.py
@@ -75,11 +75,12 @@ npm run demo:behavior
 npm run demo:implement
 npm run demo:security
 npm run demo:quality
+npm run demo:python-startup
 ```
 
 The Python test suite covers simulated Codex hook events, snapshots, and the verification runner in disposable Git repositories. `npm test` remains a convenience alias for that suite. These simulations do not prove Codex loaded or trusted the hook.
 
-The checkout demo is intentionally defective: `demo:shallow` passes because it stubs the pricing function, while `demo:behavior` is expected to fail because the implementation charges 9,990 cents instead of the expected 9,000. `demo:implement` checks a focused correction and visible invalid-input failure. `demo:security` exercises cross-user access against vulnerable and corrected fixtures. `demo:quality` runs the same behavior cases against a straightforward function and an unnecessarily layered alternative; it checks behavior equivalence, not readability.
+The checkout demo is intentionally defective: `demo:shallow` passes because it stubs the pricing function, while `demo:behavior` is expected to fail because the implementation charges 9,990 cents instead of the expected 9,000. `demo:implement` checks a focused correction and visible invalid-input failure; its scenario explains how to set up the failing starting state in a disposable copy. `demo:security` exercises cross-user access against vulnerable and corrected fixtures. `demo:quality` runs the same behavior cases against a straightforward function and an unnecessarily layered alternative; it checks behavior equivalence, not readability. `demo:python-startup` demonstrates resource ownership and startup failure cleanup in original, standard-library-only Python code; see `demo/scenarios/python-startup.md` for the exercise.
 
 ## Evaluating Engineering Guard
 
@@ -90,6 +91,23 @@ Engineering Guard separates three kinds of evidence:
 - **Qualitative:** Review Better Prompt examples and the engineering-quality scenario for intent preservation, useful steps, appropriate scope, and readable responsibilities. Model judgment is not reported as a deterministic pass/fail guarantee.
 
 The verification runner can collect repeatable command evidence for manual or model-assisted review without adding a separate evaluation framework.
+
+### Developing a skill incrementally
+
+For a material skill change, identify one agent behaviour to improve and an existing scenario that could expose the failure. Record a baseline live run when practical, make the smallest change to the owning skill, then repeat the scenario and relevant deterministic checks. Add a new scenario only when existing ones cannot expose the behaviour. Record a human promotion decision; passing fixture tests alone does not establish that the agent followed the skill.
+
+Keep a short evaluation record for each material revision, in the change or its review notes rather than a mandatory new repository file:
+
+```text
+Skill and revision: <path and commit or worktree fingerprint>
+Target behaviour and scenario: <expected action and unacceptable outcome>
+Run context: <client, model, date, relevant settings>
+Observed: <baseline and revised outputs or links; expected criteria met/not met and why>
+Checks: <commands, results, expected failures, and unverified boundaries>
+Human decision: <promote, revise, or defer; reviewer and reason>
+```
+
+For work involving several dependent steps, use the client's transient task list to track the next coherent, verifiable increment and its check. Update it from observed results, not intended progress. A checked task is not evidence that a requirement works; small changes need no tracker, and no separate persistent tasks file is required. Preserve the distinction between a skill's promotion decision and a developer's approval of an application architecture plan.
 
 ## Scope
 

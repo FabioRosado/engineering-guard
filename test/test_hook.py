@@ -150,6 +150,16 @@ class HookTests(unittest.TestCase):
             event["session_id"] = f"naming-pattern-{index}"
             self.assertEqual(self.run_hook(event)["hookSpecificOutput"]["permissionDecision"], "deny")
 
+    def test_fixture_file_and_keyword_mode_write_receive_correct_policies(self):
+        fixture_patch = "*** Begin Patch\n*** Update File: tests/conftest.py\n-old\n+new\n*** End Patch"
+        denied = self.run_hook(tool_event("apply_patch", fixture_patch, "fixture-session"))
+        self.assertIn(POLICIES["testing"], denied["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn(POLICIES["engineering"], denied["hookSpecificOutput"]["additionalContext"])
+
+        command = "python -c \"open('src/checkout.py', mode='w').write('new')\""
+        denied = self.run_hook(tool_event("Bash", command, "keyword-write-session"))
+        self.assertIn(POLICIES["engineering"], denied["hookSpecificOutput"]["additionalContext"])
+
     def test_session_start_after_compaction_restores_delivered_policies(self):
         session_id = "compact-session"
         self.run_hook(session_event("SessionStart", session_id, source="startup"))
@@ -247,8 +257,22 @@ class HookTests(unittest.TestCase):
             self.assertIn(f"name: {name}\n", skill)
         for event in ("SessionStart", "PreToolUse", "SessionEnd"):
             command = config["hooks"][event][0]["hooks"][0]
-            self.assertIn("python3 .codex/hooks/testing_guard.py", command["command"])
-            self.assertIn("py -3 .codex/hooks/testing_guard.py", command["commandWindows"])
+            self.assertIn("git rev-parse --show-toplevel", command["command"])
+            self.assertIn("'--show-toplevel'", command["commandWindows"])
+
+    def test_local_hook_command_runs_from_subdirectory(self):
+        config = json.loads(HOOK_CONFIG_PATH.read_text(encoding="utf-8"))
+        command = config["hooks"]["SessionStart"][0]["hooks"][0]
+        result = subprocess.run(
+            command["commandWindows" if os.name == "nt" else "command"],
+            input=json.dumps(session_event("SessionStart", "subdirectory-session")),
+            text=True,
+            capture_output=True,
+            shell=True,
+            cwd=PROJECT_ROOT / "demo",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(POLICIES["testing"], json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"])
 
     def test_malformed_hook_input_preserves_codex_handling(self):
         result = subprocess.run([sys.executable, str(HOOK_PATH)], input="{not-json", text=True, capture_output=True)

@@ -21,6 +21,11 @@ security risks, not to maximise the number of findings.
 
 - Trace untrusted inputs, identities, and sensitive operations
   through the actual execution and trust boundaries.
+- For design and pre-implementation reviews, recommend a small
+  set of threat-relevant preventive controls and secure defaults
+  before unsafe assumptions become embedded in implementation.
+- Distinguish preventive design recommendations from confirmed
+  vulnerabilities in existing behavior.
 - Verify that security controls protect the relevant operation;
   do not infer safety from the presence of middleware,
   validation functions, or frontend restrictions alone.

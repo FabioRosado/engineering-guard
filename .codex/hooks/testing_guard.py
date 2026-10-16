@@ -46,6 +46,7 @@ def is_test_file(file_path):
         for pattern in (
             r"(?:^|/)test[^/]*\.py$",
             r"_test\.py$",
+            r"(?:^|/)(?:tests?|testing)/.*(?:conftest|fixtures|factories|helpers)\.py$",
             rf"\.(?:test|spec)\.{JAVASCRIPT_TEST_EXTENSION}$",
             rf"/__tests__/.*\.{JAVASCRIPT_TEST_EXTENSION}$",
         )
@@ -102,7 +103,7 @@ def is_likely_shell_write(command):
         re.IGNORECASE,
     )
     language_file_writes = re.compile(
-        r"\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?)\s*\(|\bopen\s*\([^,]+,\s*['\"][wa]|\.(?:write_text|write_bytes|unlink)\s*\(",
+        r"\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?)\s*\(|\bopen\s*\([^,]+,\s*(?:['\"][wax]|mode\s*=\s*['\"][wax])|\.(?:write_text|write_bytes|unlink)\s*\(",
         re.IGNORECASE,
     )
     return has_shell_redirection(command) or bool(file_commands.search(command)) or bool(language_file_writes.search(command))

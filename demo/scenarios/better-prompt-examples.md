@@ -137,3 +137,11 @@ These are behavioral examples, not a required template. A useful transformation 
 **Expected:** Keep the scope on the dismissal regression and preserve explicitly named behavior.
 
 **Avoid:** General toast cleanup, changing timeout/action semantics, or expanding the work into a component redesign.
+
+### Missing product decision — clarify before prompting
+
+**Request:** “Add account deletion. Keep the data for a while in case users return.”
+
+**Expected behavior:** Check whether repository policy defines retention. If not, ask the developer what retention behavior is intended before producing an actionable implementation prompt. The duration affects product and privacy behavior, and the next agent should not choose it without approval.
+
+**Avoid:** Inventing a retention duration or hiding the unresolved decision in instructions for the next agent.

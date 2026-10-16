@@ -120,6 +120,17 @@ class VerificationRunnerTests(unittest.TestCase):
         self.assertEqual(report["repository"]["changedFiles"], [{"path": "src/handler.mjs", "status": "M"}])
         self.assertIn("src/handler.mjs", report["repository"]["diffStat"])
 
+    def test_staged_only_change_appears_in_scope(self):
+        root = self.create_repository({}, {"src/handler.mjs": "original"})
+        source = root / "src" / "handler.mjs"
+        source.write_text("staged", encoding="utf-8")
+        subprocess.run(["git", "add", "src/handler.mjs"], cwd=root, check=True)
+        source.write_text("original", encoding="utf-8")
+
+        result, report = self.run_runner(root)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(report["repository"]["changedFiles"], [{"path": "src/handler.mjs", "status": "M"}])
+
     def test_unborn_repository_is_inventoried(self):
         root = self.create_repository({"test": "node --test"}, commit=False)
 
@@ -181,6 +192,23 @@ class VerificationRunnerTests(unittest.TestCase):
         self.assertFalse(report["repository"]["snapshot"]["unchangedDuringChecks"])
         self.assertNotEqual(report["repository"]["snapshot"]["before"], report["repository"]["snapshot"]["after"])
         self.assertEqual(report["assessment"], "execution_evidence_only")
+
+    def test_change_then_restore_between_checks_remains_stale(self):
+        root = self.create_repository(
+            {
+                "change": "node -e \"require('node:fs').writeFileSync('src/handler.mjs', 'changed')\"",
+                "restore": "node -e \"require('node:fs').writeFileSync('src/handler.mjs', 'original')\"",
+            },
+            {"src/handler.mjs": "original"},
+        )
+        result, report = self.run_runner(root, "--run", "change", "--run", "restore")
+        checks = report["checks"]["executed"]
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(report["status"], "snapshot_changed")
+        self.assertEqual(report["repository"]["snapshot"]["before"], report["repository"]["snapshot"]["after"])
+        self.assertFalse(report["repository"]["snapshot"]["unchangedDuringChecks"])
+        self.assertEqual(checks[0]["snapshotAfter"], checks[1]["repositoryFingerprint"])
+        self.assertNotEqual(checks[0]["repositoryFingerprint"], checks[1]["repositoryFingerprint"])
 
     def test_unavailable_check_and_invalid_baseline_return_structured_errors(self):
         root = self.create_repository({"test": "node -e \"process.exit(9)\""})

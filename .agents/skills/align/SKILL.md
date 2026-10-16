@@ -28,6 +28,9 @@ Identify:
 - Current approval status.
 
 A Research recommendation is never equivalent to developer approval.
+When continuing a Research proposal stored at a decision-record path,
+update that record with revision and approval status; do not infer
+approval from the path or create a competing record.
 
 Where Spec Kit documents already exist, respect their intended roles and avoid duplicating or silently overwriting them. Do not assume a generated plan has been approved.
 
@@ -80,6 +83,12 @@ As material decisions are resolved, update the proposed architecture and impleme
 
 Explain when new evidence or decisions invalidate previous assumptions.
 
+Before requesting approval for a material plan, re-check the revised approach
+against applicable project instructions, policies, constitutions, and existing
+contracts. Report material conflicts or unresolved constraints; do not treat a
+completed checklist or template as proof of compliance. Keep this check
+proportional and omit irrelevant requirements.
+
 Ensure the plan contains enough information for Implement Mode to execute without repeatedly reopening settled architectural questions.
 
 Preserve implementation autonomy for local decisions that do not materially change the approved architecture.
@@ -107,7 +116,9 @@ Include:
 - Objective and acceptance criteria.
 - Relevant repository evidence and references.
 - Selected or proposed architecture and rationale.
-- Significant rejected alternatives and reasons.
+- Meaningful alternatives and their status (proposed, selected,
+  rejected, or deferred), with evidence, trade-offs, assumptions,
+  rationale, and conditions that could change the decision.
 - Confirmed decisions and unresolved proposals.
 - Engineering, security, and compatibility constraints.
 - Implementation steps and material boundaries.
@@ -116,6 +127,10 @@ Include:
 - Plan revision and approval status.
 
 Separate observed facts, developer decisions, and agent recommendations.
+
+Selected means explicitly chosen by the developer. Preserve meaningful
+rejected options and the evidence or changed conditions that could justify
+revisiting them. Do not invent alternatives to fill out the record.
 
 Do not create competing specifications when an appropriate existing record can be used.
 
@@ -161,42 +176,25 @@ Do not start implementation automatically.
 
 Report the current status, material decisions changed, and any remaining questions without repeating the entire plan unnecessarily.
 
-## 8. Considered alternatives and decision rationale
+## 8. Make alternatives and rationale visible
 
-For substantive architectural decisions, preserve the
-alternatives genuinely evaluated during Research and Align.
+For substantive decisions, show which alternatives were genuinely
+considered and why the proposed approach was selected over them.
+Do not present only the recommendation: make the trade-offs and
+rejected options visible so the developer can challenge the reasoning.
 
-In decision records, present the proposed implementation
-approach first, followed by the decisions and alternatives
-that explain why it was recommended.
+For each meaningful alternative:
 
-For each meaningful alternative, record:
+- State its intended benefit and the evidence for or against it.
+- Identify assumptions that affect whether it is viable; mark
+  assumptions that were not verified.
+- Explain the practical trade-off and why the option was selected,
+  rejected, or deferred under the current requirements.
+- State what new evidence or changed requirement would justify
+  revisiting the conclusion.
 
-- The approach and its intended benefits.
-- Its status: Proposed, Selected, Rejected, or Deferred.
-- Why it was recommended, selected, rejected, or deferred.
-- Relevant evidence and engineering trade-offs.
-- Important assumptions underlying the decision.
-- Conditions or new evidence that would justify revisiting it.
-
-Distinguish:
-
-- Proposed: Recommended but not yet approved by the developer.
-- Selected: Explicitly chosen by the developer.
-- Rejected: Unsuitable given current evidence or requirements.
-- Deferred: Potentially useful, but not justified or feasible now.
-
-Distinguish developer-approved individual decisions from
-approval of the complete implementation plan.
-
-Do not invent alternatives to satisfy a documentation quota.
-
-Preserve significant rejected alternatives so future developers
-and agents do not repeatedly propose approaches already
-evaluated without identifying new evidence.
-
-If new evidence invalidates an earlier rationale, flag it
-explicitly and return material decisions for human review.
-
-Keep this section concise. Document decision reasoning,
-not the entire investigation transcript.
+Do not dismiss an option based on an unsupported assumption, and do
+not invent alternatives to meet a quota. If the comparison depends on
+an unresolved material assumption, surface it for developer review.
+Keep the comparison proportionate and preserve the material reasoning
+in the decision record.

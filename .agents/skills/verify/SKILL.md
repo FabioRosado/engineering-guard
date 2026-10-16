@@ -290,6 +290,8 @@ Do not manufacture findings or silently fix them.
 
 Choose a status based on the evidence available for
 the requested scope.
+Name the reviewed change or feature alongside the status,
+including when the status is Not verified.
 
 **Verified**
 Relevant requirements have been checked, appropriate
@@ -350,7 +352,8 @@ where necessary.
 ### Readiness
 
 Verified, Verified with caveats, or Not verified,
-with a brief evidence-based justification.
+for the named reviewed scope, with a brief evidence-based
+justification.
 
 Do not claim complete correctness or security.
 
