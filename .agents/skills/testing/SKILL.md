@@ -244,6 +244,13 @@ Do not rewrite the test suite unless requested.
 
 Execute relevant tests and application checks when authorised.
 
+When `scripts/verification_runner.py` is present, inspect its
+available scripts and explicitly select relevant test commands
+with `--run <name>`. Review captured failures, errors, and
+coverage artifact paths. The runner records what executed; it
+cannot judge whether tests exercise meaningful production
+behavior, so inspect the test and production paths directly.
+
 Report:
 
 - Behaviour and requirements covered.

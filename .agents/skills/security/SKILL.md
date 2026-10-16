@@ -160,6 +160,13 @@ Do not fabricate proof-of-concept results.
 Inspect existing project security tooling and available
 local checks before introducing alternatives.
 
+When `scripts/verification_runner.py` is present, review its
+available script inventory and select only relevant local
+checks whose effects and output are safe for a read-only audit.
+The runner can record command results and common coverage
+artifact paths; it does not validate vulnerabilities, assess
+test quality, or interpret scanner findings.
+
 Where safe and relevant, use configured static analysis,
 dependency audits, secret detection, or existing security tests.
 

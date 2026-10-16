@@ -1,11 +1,5 @@
 ---
 name: engineering-guard-align
-description: Refine repository-grounded architecture decisions through interactive discussion and maintain a human-approved implementation plan. Use to discuss, resume, or approve a research recommendation; never approve it yourself.
----
-
----
-
-name: engineering-guard-align
 description: Challenge, refine, and approve repository-grounded architectural decisions through interactive discussion. Maintain a durable implementation plan under human control; never approve or implement it autonomously.
 
 ---

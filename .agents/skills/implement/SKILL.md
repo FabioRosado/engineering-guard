@@ -187,6 +187,13 @@ application entry points supported by the repository.
 
 Choose checks proportionate to the change and its risks.
 
+When `scripts/verification_runner.py` is present, inspect its
+inventory and explicitly select relevant root npm scripts with
+`--run <name>`. Use `--base <ref>` when a comparison baseline
+other than `HEAD` is relevant. The runner captures execution
+evidence; it does not decide whether the checks are sufficient.
+Do not run every listed script automatically.
+
 Inspect actual command results rather than assuming success.
 
 Distinguish:

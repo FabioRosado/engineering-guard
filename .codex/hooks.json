@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node .codex/hooks/testing-guard.mjs",
+            "command": "python3 .codex/hooks/testing_guard.py",
+            "commandWindows": "py -3 .codex/hooks/testing_guard.py",
             "timeout": 5
           }
         ]
@@ -18,7 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node .codex/hooks/testing-guard.mjs",
+            "command": "python3 .codex/hooks/testing_guard.py",
+            "commandWindows": "py -3 .codex/hooks/testing_guard.py",
             "timeout": 5,
             "statusMessage": "Checking Engineering Guard policies"
           }
@@ -30,7 +32,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node .codex/hooks/testing-guard.mjs",
+            "command": "python3 .codex/hooks/testing_guard.py",
+            "commandWindows": "py -3 .codex/hooks/testing_guard.py",
             "timeout": 3
           }
         ]

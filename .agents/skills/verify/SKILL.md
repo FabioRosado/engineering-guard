@@ -53,11 +53,11 @@ identify the limitation and narrow the claims accordingly.
 
 Use the existing snapshot utility where available:
 
-`node scripts/verification-snapshot.mjs`
+`python3 scripts/verification_snapshot.py`
 
 Compare a prior fingerprint when supplied:
 
-`node scripts/verification-snapshot.mjs <fingerprint>`
+`python3 scripts/verification_snapshot.py <fingerprint>`
 
 A missing verification receipt requires fresh evidence.
 A mismatched fingerprint invalidates prior evidence tied
@@ -77,6 +77,22 @@ the instability and its effect on confidence.
 
 A fingerprint identifies a code snapshot; it does not
 prove that tests ran or that behaviour is correct.
+
+When `scripts/verification_runner.py` is present, use it to
+collect the comparison baseline, changed-file scope, available
+root npm scripts, selected check results, and before/after
+fingerprints:
+
+`python3 scripts/verification_runner.py [--base <ref>] [--run <script> ...]`
+
+The inventory-only form does not execute checks. Inspect the
+listed scripts before selecting them; only named scripts run.
+Use the captured output and paths as evidence, then inspect the
+actual code, tests, and relevant boundaries yourself. A passing
+command is execution evidence, not a correctness or security
+conclusion. If the runner reports `snapshot_changed`, checks
+were performed against an unstable worktree and affected checks
+must be repeated against the final snapshot.
 
 ## 3. Inspect the actual implementation
 
