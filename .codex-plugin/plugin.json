@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "Engineering Guard",
     "shortDescription": "Codex engineering workflows",
-    "longDescription": "Seven reusable engineering skills and a policy-delivery hook for Codex. Verification tools and demos remain repository-local.",
+    "longDescription": "Eight reusable engineering skills, including a software factory orchestrator, and a policy-delivery hook for Codex. Verification tools and demos remain repository-local.",
     "developerName": "Engineering Guard",
     "category": "Developer Tools",
     "capabilities": [

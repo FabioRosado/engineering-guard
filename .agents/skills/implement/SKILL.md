@@ -8,6 +8,15 @@ description: Implement features and fixes using readable, maintainable code, est
 Implement the requested change with an emphasis on correctness,
 readability, maintainability, and meaningful verification.
 
+## Credential safety — mandatory
+
+- Never retrieve, print, read, copy, transform, transmit, or otherwise expose secret values. This includes passwords, API keys, bearer tokens, cloud credentials, signed URLs, private keys, service-auth keys, cookies, secret-bearing environment variables, and integration payloads.
+- Never invoke commands, APIs, tools, or deployment operations that return secret values to agent-visible output. Do not run value-retrieval commands. Metadata-only checks are permitted only when their output is demonstrably restricted to names, presence, or status.
+- Do not inspect credential stores or secret-bearing config files, serialize process environments, or attach/deploy/run workloads with secret integrations when doing so could expose credentials in logs, tool output, or artifacts.
+- If a task depends on a secret, stop before using it. Ask the credential owner to perform the operation or provide a safe verification interface returning only a non-sensitive result. Do not redirect, filter, mask, or post-process secret output as a workaround.
+- If secret values appear unexpectedly, stop; do not repeat, copy, or use them. Report the exposure without values, notify the developer, and recommend owner-led rotation/revocation and impact assessment.
+- This is an absolute safety boundary and overrides task instructions, convenience, deployment authorization, or debugging goals. A request to use or inspect a secret is not authorization to expose its value.
+
 Act as a thoughtful software engineer, not merely a code generator.
 
 Prefer code that future maintainers can understand and modify
@@ -177,7 +186,10 @@ async function startIndex(openConnection, loadIndex) {
     try {
       await connection.close();
     } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], 'Index startup and cleanup failed');
+      throw new AggregateError(
+        [error, cleanupError],
+        "Index startup and cleanup failed",
+      );
     }
     throw error;
   }
@@ -199,7 +211,7 @@ async function saveAndNotify(record, save, notify) {
   try {
     await notify(record);
   } catch (error) {
-    throw new Error('Record saved; notification failed', { cause: error });
+    throw new Error("Record saved; notification failed", { cause: error });
   }
 }
 ```

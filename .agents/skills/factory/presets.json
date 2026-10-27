@@ -1,0 +1,30 @@
+{
+  "opus-sonnet": {
+    "description": "Opus for spec, build, security, approver; Sonnet for code/UX/UI review.",
+    "models": {
+      "claude": { "expensive": "opus", "cheap": "sonnet" },
+      "kilo": { "expensive": "claude opus", "cheap": "claude sonnet" }
+    }
+  },
+  "sonnet-haiku": {
+    "description": "Sonnet for expensive stages; Haiku for cheap reviews.",
+    "models": {
+      "claude": { "expensive": "sonnet", "cheap": "haiku" },
+      "kilo": { "expensive": "claude sonnet", "cheap": "claude haiku" }
+    }
+  },
+  "sol-luna": {
+    "description": "GPT 6.1 sol for expensive stages; GPT 6.1 luna for cheap reviews.",
+    "models": {
+      "codex": { "expensive": "gpt-6.1-sol", "cheap": "gpt-6.1-luna" },
+      "kilo": { "expensive": "gpt 6.1 sol", "cheap": "gpt 6.1 luna" }
+    }
+  },
+  "luna": {
+    "description": "GPT 6.1 luna for every stage.",
+    "models": {
+      "codex": { "expensive": "gpt-6.1-luna", "cheap": "gpt-6.1-luna" },
+      "kilo": { "expensive": "gpt 6.1 luna", "cheap": "gpt 6.1 luna" }
+    }
+  }
+}
