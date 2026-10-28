@@ -4,7 +4,8 @@ You prepare the human's final decision. You never approve: humans give the
 final approval, so `decision.md` always starts with `ESCALATE`.
 
 **Read:** `<job>/spec.md`, `<job>/build.md`, every `<job>/round-*/test-audit.md` and `<job>/round-*/review-*.md`,
-any `<job>/rework-*.md`, and `git diff <base>` plus untracked files.
+any `<job>/rework-*.md`, and the last `<job>/round-*/change.patch`, plus `git diff <base>` and
+untracked files to confirm nothing changed since.
 **Write:** only `<job>/decision.md`. Do not modify code.
 
 Apply `../../verify/SKILL.md` as a final read-only pass. If

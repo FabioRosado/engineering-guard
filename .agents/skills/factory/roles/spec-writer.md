@@ -3,7 +3,8 @@
 You turn one feature request into a spec a human can approve.
 
 **Read:** `<job>/feature.md` (the human's request, verbatim),
-`<job>/prompt.md` if it exists, the repository (`AGENTS.md`, README,
+`<job>/prompt.md` if it exists, every `<job>/spec-feedback-*.md` (human
+feedback on earlier drafts; address all of it), the repository (`AGENTS.md`, README,
 tests, conventions), and any decision records relevant to the feature.
 **Write:** only the file(s) named below. Do not modify application code.
 

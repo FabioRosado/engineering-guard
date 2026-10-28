@@ -18,7 +18,7 @@ feature ─► spec-writer ─► [human: approve-spec] ─► builder ◄──
                        ▼              ▼               ▼              ▼     │
                    security          ux              ui            code    │
                        └──────────────┴── WAIT FOR ALL ┴─────────────┘     │
-                                              │ any CHANGES (≤ 2 rounds) ──┘
+                                              │ any CHANGES (≤ 2 review rounds) ┘
                                               ▼ all PASS / N/A, or limit hit
                                            approver ─► ESCALATE ─► needs-human
 ```
@@ -37,16 +37,25 @@ feature ─► spec-writer ─► [human: approve-spec] ─► builder ◄──
 Rules enforced by the board script:
 
 - Agents read context from job files and write only their own file.
-- The test audit starts with `VERDICT: PASS` or `VERDICT: CHANGES`. Every
-  review starts with `VERDICT: PASS`, `VERDICT: CHANGES` or `VERDICT: N/A`.
+- The test audit, security and code reviews start with `VERDICT: PASS` or
+  `VERDICT: CHANGES`; UX and UI reviews may also use `VERDICT: N/A`. A
+  `CHANGES` verdict must be followed by at least one finding.
+- `build-done` freezes the change into `round-N/change.patch` and
+  `round-N/files.txt` (untracked files included); every auditor and reviewer
+  reads that snapshot.
 - Reviewers run only after the test audit passes. A test-audit `CHANGES` sends
-  the job back to the builder and uses one of the round's attempts; at the
-  limit the reviewers run anyway and the open test findings appear as a
+  the job back to the builder once per attempt, without using a review round;
+  after that the reviewers run anyway and the open test findings appear as a
   warning on the board and in `decision.md`.
-- A round is complete only when all four reviews exist and are valid. The
+- When the spec says `UI impact: no` and no changed file is user-facing
+  (markup, styles, scripts, templates, images), the script writes the UI
+  `N/A` review itself and the UI reviewer is not spawned. UX always runs,
+  because CLI output and messages can change in any source file.
+- A round closes only when all four reviews exist and are valid. The
   builder is never restarted mid-round.
-- Any review `CHANGES` sends the job back to a fresh builder, at most twice per
-  attempt (test-audit rebuilds count towards the same limit). After that the approver runs with the open findings listed.
+- Any review `CHANGES` sends the job back to a fresh builder; each attempt
+  (initial build or rework) gets two review rounds. After that the approver
+  runs with the open findings listed.
 - `decision.md` must start with `ESCALATE`: the human always decides.
 - `approve-spec` rewrites the spec's `Status` line to `Approved`, because
   builders read the spec file, not the board.
@@ -109,7 +118,9 @@ session model and the board records `default (fallback)`.
 | `next` | Same, using the first unchecked `- [ ]` item in `.factory/backlog.md` (and checks it). |
 | `approve-spec <id>` | Human approval of the spec. Runs build → reviews → approver until **needs-human**. |
 | `approve <id>` | Read-only. Suggests a branch name, commit message and PR description that follow the repo's conventions. You commit and push. |
-| `rework <id> <note>` | Send a **needs-human** job back to the builder with your note; two more review rounds are allowed. |
+| `rework <id> <note>` | Send a **needs-human** job back to the builder with your note; the budget resets (two review rounds, one test-audit rebuild). |
+| `resume <id>` | Continue an interrupted job from its current stage. |
+| `abandon <id> <reason>` | Close a job for good, for example after a crash; it stops blocking new builds. Code changes stay in the worktree. |
 
 The orchestrator's first step is always to create the job and show you its
 id; it saves your full feature text to `feature.md` for the spec-writer and
@@ -121,7 +132,8 @@ are passed through verbatim. Wording the feature as instructions
 research and acceptance criteria.
 
 To give feedback on a spec instead of approving it, just reply with the
-feedback; the spec-writer revises `spec.md` and the job stays in spec-review.
+feedback; it is saved as `spec-feedback-N.md`, the spec-writer revises
+`spec.md`, and the job returns to spec-review.
 
 ## A typical run
 
@@ -150,8 +162,8 @@ repository's `.gitignore` is not modified.
   backlog.md         # queue for `next`
   dashboard.html     # copied from the skill on every run
   jobs/001-<slug>/
-    feature.md  prompt.md  spec.md  build.md  decision.md  rework-N.md
-    round-1/test-audit.md  review-security.md  review-ux.md  review-ui.md  review-code.md
+    feature.md  prompt.md  spec.md  spec-feedback-N.md  build.md  decision.md  rework-N.md
+    round-1/change.patch  files.txt  test-audit.md  review-security.md  review-ux.md  review-ui.md  review-code.md
 ```
 
 ## Dashboard
@@ -180,13 +192,17 @@ says why. You normally never call it yourself except for the Claude setup.
 | `models <preset> \| <exp> <cheap> --cli <cli>` | Write `config.json`. |
 | `new "<feature>"` / `new --from-backlog` | Create a job in `spec`. |
 | `spec-written <id>` | `spec` → `spec-review` (needs `prompt.md`, `spec.md`). |
+| `spec-feedback <id> "<note>"` | `spec-review` → `spec`; writes `spec-feedback-N.md`. |
 | `approve-spec <id>` | `spec-review` → `build`; marks `spec.md` approved and records the base commit. |
-| `build-done <id>` | `build` → `test-audit` (needs `build.md` and a change since the base), or → `needs-human` if `build.md` starts with `BLOCKED`. |
-| `test-audit-done <id>` | Reads `round-N/test-audit.md` → `review`, or `build` on `CHANGES`. |
-| `round-status <id>` | Reads verdicts; completes the round → `build` or `approver`. |
+| `build-done <id>` | `build` → `test-audit` (needs `build.md` and a change since the base; writes the round snapshot), or → `needs-human` if `build.md` starts with `BLOCKED`. |
+| `test-audit-done <id>` | Reads `round-N/test-audit.md` → `review` (returns the reviewers to `spawn`), or `build` on `CHANGES`. |
+| `round-status <id>` | Never changes the stage: saves and prints reviewer verdicts, `invalid` files and whether the round is complete. |
+| `close-round <id>` | Closes a complete round → `build` or `approver`. |
 | `decision <id>` | `approver` → `needs-human` (needs `ESCALATE`). |
 | `rework <id> "<note>"` | `needs-human` → `build`; also marks `spec.md` approved. |
-| `record-model <id> <stage> <model>` | Note the model a stage actually ran on. |
+| `abandon <id> "<reason>"` | Any stage → `abandoned`. |
+| `resume <id>` | Prints the next step for the job's current stage. |
+| `record-model <id> <stage> <model>` | Note the model a stage actually ran on (stage must be known). |
 | `show [<id>]` | Print the board or one job. |
 | `install-claude [--claude-home DIR]` | Install the Claude skill pointer and subagents. |
 

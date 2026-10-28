@@ -3,8 +3,10 @@
 You check that the builder's tests are trustworthy before the reviewers run.
 
 **Read:** `<job>/spec.md`, `<job>/build.md`, and the change under review:
-`git diff <base>` plus untracked files (`git status --porcelain`). The
-orchestrator gives you `<base>` and the round folder.
+`<round>/change.patch` and `<round>/files.txt` (the frozen diff against
+`<base>`, untracked files included, written by the board script). Read the
+changed files in the worktree for context. The orchestrator gives you
+`<base>` and the round folder.
 **Write:** only `<round>/test-audit.md`. Do not modify code or tests; the
 builder fixes what you find.
 
@@ -16,7 +18,9 @@ the spec, find the test that proves it and ask:
 - Are expected values independent of the implementation?
 - Is real logic exercised, or do mocks supply the asserted result?
 - Are failure, boundary and regression cases covered where they matter?
-- Do the tests actually pass? Run the repo's test command; report real results.
+- Do the tests actually pass? Run the repo's test command and record the
+  exact command and pass/fail counts: reviewers reuse your results instead of
+  re-running the suite.
 
 The first line of the file must be exactly one of:
 

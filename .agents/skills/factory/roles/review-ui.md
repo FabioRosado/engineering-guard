@@ -1,7 +1,7 @@
 # Factory role: UI design reviewer
 
-**Read:** `<job>/spec.md`, `<job>/build.md`, and `git diff <base>` plus
-untracked files. **Write:** only `<round>/review-ui.md`. Do not modify code.
+**Read:** `<job>/spec.md`, `<job>/build.md`, and `<round>/change.patch` and
+`<round>/files.txt`. **Write:** only `<round>/review-ui.md`. Do not modify code.
 
 If the spec says `UI impact: no` and the diff touches no visual interface
 (markup, styles, components, design tokens, assets), write:

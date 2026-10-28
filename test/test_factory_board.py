@@ -61,6 +61,25 @@ class FactoryBoardTests(unittest.TestCase):
         self.pass_test_audit(job_id, 1)
         return job_id
 
+    def job_in_review_after_failed_test_audit(self):
+        job_id = self.approved_job()
+        self.simulate_build(job_id)
+        self.factory("build-done", job_id)
+        self.job_file(job_id, "round-1/test-audit.md", "VERDICT: CHANGES\n\nNo test for the limit.\n")
+        self.assertEqual(self.factory("test-audit-done", job_id)["next"], "rebuild")
+        self.factory("build-done", job_id)
+        self.pass_test_audit(job_id, 2)
+        return job_id
+
+    def approved_job(self, spec="spec\n"):
+        job_id = self.factory("new", "Add rate limiting")["id"]
+        self.job_file(job_id, "feature.md", "feature\n")
+        self.job_file(job_id, "prompt.md", "prompt\n")
+        self.job_file(job_id, "spec.md", spec)
+        self.factory("spec-written", job_id)
+        self.factory("approve-spec", job_id)
+        return job_id
+
     def simulate_build(self, job_id, report="built\n"):
         (self.repo / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
         self.job_file(job_id, "build.md", report)
@@ -150,28 +169,44 @@ class FactoryBoardTests(unittest.TestCase):
         status = self.factory("round-status", job_id)
         self.assertFalse(status["complete"])
         self.assertEqual(status["next"], "wait")
-        self.assertEqual(status["job"]["reviews"]["ui"], "invalid")
-        self.assertEqual(status["job"]["stage"], "review")
+        self.assertEqual(status["reviews"]["ui"], "invalid")
+        # Progress is saved for the dashboard even though the stage does not move.
+        self.assertEqual(self.factory("show", job_id)["reviews"]["security"], "PASS")
+        self.assertIn("ui", self.factory("close-round", job_id, expect_error=True))
+        self.assertEqual(self.factory("show", job_id)["stage"], "review")
 
         self.write_reviews(job_id, 1, {"ui": "N/A"})
+        # round-status is read-only: calling it twice must not advance the job.
+        self.factory("round-status", job_id)
         status = self.factory("round-status", job_id)
-        self.assertTrue(status["complete"])
-        self.assertEqual(status["next"], "approver")
+        self.assertEqual((status["complete"], status["next"]), (True, "close-round"))
+        self.assertEqual(self.factory("close-round", job_id)["next"], "approver")
 
-    def test_changes_trigger_one_rebuild_then_escalate_at_round_limit(self):
+    def test_security_and_code_cannot_be_not_applicable_and_changes_need_findings(self):
+        job_id = self.job_in_review()
+        self.write_reviews(job_id, 1, {"security": "N/A", "ux": "N/A", "ui": "N/A"})
+        self.job_file(job_id, "round-1/review-code.md", "VERDICT: CHANGES\n\n")
+
+        status = self.factory("round-status", job_id)
+        self.assertEqual(status["reviews"]["security"], "invalid")
+        self.assertEqual(status["reviews"]["code"], "invalid")
+        problems = " ".join(status["invalid"].values())
+        self.assertIn("VERDICT: PASS or VERDICT: CHANGES", problems)
+        self.assertIn("needs at least one finding", problems)
+
+    def test_review_changes_trigger_one_rebuild_then_escalate(self):
         job_id = self.job_in_review()
         self.write_reviews(job_id, 1, {"security": "CHANGES", "ux": "N/A", "ui": "N/A", "code": "PASS"})
-        status = self.factory("round-status", job_id)
-        self.assertEqual(status["next"], "rebuild")
-        self.assertEqual(status["job"]["round"], 2)
-        self.assertEqual(status["job"]["stage"], "build")
+        result = self.factory("close-round", job_id)
+        self.assertEqual(result["next"], "rebuild")
+        self.assertEqual((result["job"]["round"], result["job"]["stage"]), (2, "build"))
 
         self.factory("build-done", job_id)
         self.pass_test_audit(job_id, 2)
         self.write_reviews(job_id, 2, {"security": "CHANGES", "ux": "N/A", "ui": "N/A", "code": "PASS"})
-        status = self.factory("round-status", job_id)
-        self.assertEqual(status["next"], "approver")
-        self.assertEqual([entry["round"] for entry in status["job"]["history"]], [1, 2])
+        result = self.factory("close-round", job_id)
+        self.assertEqual(result["next"], "approver")
+        self.assertEqual([entry["round"] for entry in result["job"]["history"]], [1, 2])
 
     def test_reviewers_wait_for_a_passing_test_audit(self):
         job_id = self.factory("new", "Add rate limiting")["id"]
@@ -200,15 +235,22 @@ class FactoryBoardTests(unittest.TestCase):
         self.assertEqual(result["next"], "review")
         self.assertEqual(result["job"]["reviews"]["code"], "pending")
         self.write_reviews(job_id, 2, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
-        status = self.factory("round-status", job_id)
+        status = self.factory("close-round", job_id)
         self.assertEqual(status["next"], "approver")
         self.assertTrue(any("test audit" in warning for warning in status["job"]["warnings"]))
         self.assertEqual([entry["test_audit"] for entry in status["job"]["history"]], ["CHANGES", "CHANGES"])
 
+    def test_test_audit_rebuilds_do_not_use_up_review_rounds(self):
+        job_id = self.job_in_review_after_failed_test_audit()
+        # Round 2 passed the audit; reviewers still get their full two rounds.
+        self.write_reviews(job_id, 2, {"security": "CHANGES", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        result = self.factory("close-round", job_id)
+        self.assertEqual((result["next"], result["job"]["round"]), ("rebuild", 3))
+
     def test_decision_must_escalate_and_rework_reopens_the_build(self):
         job_id = self.job_in_review()
         self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
-        self.factory("round-status", job_id)
+        self.factory("close-round", job_id)
 
         self.job_file(job_id, "decision.md", "APPROVE\n\nShip it.\n")
         error = self.factory("decision", job_id, expect_error=True)
@@ -218,7 +260,8 @@ class FactoryBoardTests(unittest.TestCase):
         self.assertEqual(self.factory("decision", job_id)["stage"], "needs-human")
 
         job = self.factory("rework", job_id, "Use a sliding window")
-        self.assertEqual((job["stage"], job["round"], job["round_limit"]), ("build", 2, 3))
+        self.assertEqual((job["stage"], job["round"]), ("build", 2))
+        self.assertEqual(job["attempt"], {"review_rounds": 0, "test_rebuilds": 0})
         note = self.repo / ".factory" / "jobs" / job_id / "rework-2.md"
         self.assertIn("sliding window", note.read_text(encoding="utf-8"))
 
@@ -268,7 +311,7 @@ class FactoryBoardTests(unittest.TestCase):
     def test_rework_refuses_while_another_job_is_building(self):
         first = self.job_in_review()
         self.write_reviews(first, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
-        self.factory("round-status", first)
+        self.factory("close-round", first)
         self.job_file(first, "decision.md", "ESCALATE\n")
         self.factory("decision", first)
         self.git("commit", "--quiet", "-am", "human commits job one")
@@ -282,6 +325,107 @@ class FactoryBoardTests(unittest.TestCase):
 
         error = self.factory("rework", first, "Tighten limits", expect_error=True)
         self.assertIn(second, error)
+
+    def test_every_reviewer_gets_the_same_snapshot_including_untracked_files(self):
+        job_id = self.approved_job()
+        (self.repo / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+        (self.repo / "limits.py").write_text("LIMIT = 5\n", encoding="utf-8")
+        self.job_file(job_id, "build.md", "built\n")
+        job = self.factory("build-done", job_id)
+
+        round_directory = self.repo / ".factory" / "jobs" / job_id / "round-1"
+        patch = (round_directory / "change.patch").read_text(encoding="utf-8")
+        self.assertIn("+VALUE = 2", patch)
+        self.assertIn("+LIMIT = 5", patch)
+        self.assertEqual((round_directory / "files.txt").read_text(encoding="utf-8"), "app.py\nlimits.py\n")
+        self.assertEqual(job["changed_files"], ["app.py", "limits.py"])
+
+    def test_ui_is_skipped_only_without_ui_impact_or_visual_files_and_ux_always_runs(self):
+        spec = "**UI impact:** no\n"
+        job_id = self.approved_job(spec)
+        self.simulate_build(job_id)
+        self.factory("build-done", job_id)
+        result = self.pass_test_audit(job_id, 1)
+        self.assertEqual(result["spawn"], ["security", "ux", "code"])
+        self.assertEqual((result["job"]["reviews"]["ux"], result["job"]["reviews"]["ui"]), ("pending", "N/A"))
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "code": "PASS"})
+        self.assertEqual(self.factory("close-round", job_id)["next"], "approver")
+
+        self.job_file(job_id, "decision.md", "ESCALATE\n")
+        self.factory("decision", job_id)
+        self.git("commit", "--quiet", "-am", "human commits")
+        other = self.approved_job(spec)
+        (self.repo / "page.html").write_text("<p>hi</p>\n", encoding="utf-8")
+        self.job_file(other, "build.md", "built\n")
+        self.factory("build-done", other)
+        result = self.pass_test_audit(other, 1)
+        self.assertEqual(result["spawn"], ["security", "ux", "ui", "code"])
+
+    def test_ui_impact_mentioned_outside_its_field_line_does_not_skip_review(self):
+        job_id = self.approved_job("**UI impact:** yes\n\nAn earlier draft said UI impact: no.\n")
+        self.simulate_build(job_id)
+        self.factory("build-done", job_id)
+        self.assertEqual(self.pass_test_audit(job_id, 1)["spawn"], ["security", "ux", "ui", "code"])
+
+    def test_snapshot_handles_files_that_are_not_utf8(self):
+        job_id = self.approved_job()
+        (self.repo / "app.py").write_bytes("NAME = 'caf\xe9'\n".encode("latin-1"))
+        (self.repo / "legacy.txt").write_bytes("na\xefve\n".encode("latin-1"))
+        self.job_file(job_id, "build.md", "built\n")
+        self.assertEqual(self.factory("build-done", job_id)["stage"], "test-audit")
+        patch = (self.repo / ".factory" / "jobs" / job_id / "round-1" / "change.patch").read_bytes()
+        self.assertIn("caf\xe9".encode("latin-1"), patch)
+        self.assertIn("na\xefve".encode("latin-1"), patch)
+
+    def test_renamed_files_are_reported_by_their_real_paths(self):
+        job_id = self.factory("new", "Add rate limiting")["id"]
+        for name in ("feature.md", "prompt.md", "spec.md"):
+            self.job_file(job_id, name, "x\n")
+        self.factory("spec-written", job_id)
+        self.git("mv", "app.py", "renamed app.py")
+
+        error = self.factory("approve-spec", job_id, expect_error=True)
+        self.assertIn("'renamed app.py'", error)
+        self.assertNotIn("->", error)
+
+    def test_spec_feedback_is_saved_for_the_spec_writer_and_reopens_the_spec(self):
+        job_id = self.factory("new", "Add rate limiting")["id"]
+        self.job_file(job_id, "feature.md", "feature\n")
+        self.job_file(job_id, "prompt.md", "prompt\n")
+        self.job_file(job_id, "spec.md", "spec\n")
+        self.factory("spec-written", job_id)
+
+        result = self.factory("spec-feedback", job_id, "Limit per IP, not per user")
+        self.assertEqual(result["job"]["stage"], "spec")
+        feedback = self.repo / ".factory" / "jobs" / job_id / "spec-feedback-1.md"
+        self.assertIn("per IP", feedback.read_text(encoding="utf-8"))
+        self.assertIn("stage 'spec'", self.factory("approve-spec", job_id, expect_error=True))
+        self.factory("spec-written", job_id)
+        self.factory("spec-feedback", job_id, "Also log rejections")
+        self.assertTrue((feedback.parent / "spec-feedback-2.md").is_file())
+
+    def test_abandoning_a_stuck_job_frees_the_worktree_and_resume_explains_next_step(self):
+        stuck = self.job_in_review()
+        self.assertIn("spawn reviewers", self.factory("resume", stuck)["next"])
+        self.git("checkout", "--", "app.py")
+
+        second = self.factory("new", "Export CSV")["id"]
+        for name in ("feature.md", "prompt.md", "spec.md"):
+            self.job_file(second, name, "x\n")
+        self.factory("spec-written", second)
+        self.assertIn(stuck, self.factory("approve-spec", second, expect_error=True))
+
+        self.assertIn("reason", self.factory("abandon", stuck, " ", expect_error=True))
+        job = self.factory("abandon", stuck, "session crashed")
+        self.assertEqual(job["stage"], "abandoned")
+        self.assertEqual(self.factory("approve-spec", second)["stage"], "build")
+        self.assertIn("already abandoned", self.factory("abandon", stuck, "again", expect_error=True))
+        self.assertIn("nothing", self.factory("resume", stuck)["next"])
+
+    def test_record_model_rejects_unknown_stages(self):
+        job_id = self.factory("new", "Add rate limiting")["id"]
+        self.assertIn("unknown stage", self.factory("record-model", job_id, "reviewer", "x", expect_error=True))
+        self.assertEqual(self.factory("record-model", job_id, "code", "sonnet")["models"], {"code": "sonnet"})
 
 if __name__ == "__main__":
     unittest.main()

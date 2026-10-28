@@ -1,6 +1,6 @@
 ---
 name: engineering-guard-factory
-description: Run a feature through the Engineering Guard software factory - spec, human spec approval, build, test audit, parallel security/UX/UI/code reviews, and an approver that always escalates to a human. Use for "/engineering-guard-factory <feature>", "next", "models", "approve-spec", "approve" or "rework".
+description: Run a feature through the Engineering Guard software factory - spec, human spec approval, build, test audit, parallel security/UX/UI/code reviews, and an approver that always escalates to a human. Use for "/engineering-guard-factory <feature>", "next", "models", "approve-spec", "approve", "rework", "resume" or "abandon".
 ---
 
 # Engineering Guard — Factory
@@ -44,7 +44,7 @@ feature ─► spec-writer ─► [HUMAN approve-spec] ─► builder ◄──�
                        ▼             ▼               ▼             ▼     │
                    security         ux              ui           code    │
                        └─────────────┴──── WAIT FOR ALL ───────────┘     │
-                                             │ any CHANGES (≤2 rounds) ──┘
+                                             │ any CHANGES (≤2 review rounds) ┘
                                              ▼ all PASS/N/A or limit hit
                                           approver ─► ESCALATE ─► needs-human
 ```
@@ -65,14 +65,22 @@ feature ─► spec-writer ─► [HUMAN approve-spec] ─► builder ◄──�
 - Agents get context from files, not the conversation. Each spawn prompt
   contains only: the absolute role file path, the job folder, the round
   number/folder, and the job `base` commit. Each agent writes only its own file.
-- The test audit starts with `VERDICT: PASS|CHANGES`; reviews start with
-  `VERDICT: PASS|CHANGES|N/A`; `decision.md` starts with
-  `ESCALATE`. The board script rejects anything else.
-- WAIT FOR ALL: spawn the four reviewers in parallel, then wait until
-  `FACTORY round-status <id>` reports `complete: true`. Never start the
-  builder mid-round. If it lists `invalid` files, re-spawn only those reviewers.
-- Reviewers run only after the test audit passes (or the round limit is hit).
-  A test-audit `CHANGES` sends the job back to the builder and uses a round.
+  Auditors and reviewers read the change from `round-N/change.patch` and
+  `round-N/files.txt`, which `build-done` writes, so all of them see the same change.
+- The test audit, security and code reviews start with `VERDICT: PASS|CHANGES`;
+  UX and UI reviews may also use `VERDICT: N/A`; a `CHANGES` verdict must be
+  followed by findings; `decision.md` starts with `ESCALATE`. The board script
+  rejects anything else.
+- WAIT FOR ALL: spawn the reviewers listed in `spawn` in parallel, then run
+  `FACTORY round-status <id>` (never changes the stage) until `complete: true`, then
+  `FACTORY close-round <id>`. Never start the builder mid-round. If
+  `round-status` lists `invalid` files, re-spawn only those reviewers.
+- If a stage agent returns without writing its file, re-spawn it once. If it
+  fails again, stop and report the stage to the human (`resume <id>` later
+  continues from there, `abandon <id>` closes the job).
+- Reviewers run only after the test audit passes (or its budget is spent).
+  A test-audit `CHANGES` sends the job back to the builder once per attempt;
+  this does not use the two review rounds.
 - Spawn a **fresh** builder each round; it reads the previous round's audit and
   reviews from disk.
 - Nobody commits, pushes, stashes, merges or switches branches. The human does.
@@ -113,9 +121,10 @@ alternatives. On Claude Code, then run `FACTORY install-claude`.
    Do not paste the feature text into the spawn prompt; it reads `feature.md`.
 4. `FACTORY spec-written <id>`.
 5. **Stop.** Tell the human to read `.factory/jobs/<id>/spec.md` and run
-   `approve-spec <id>`. If the human gives feedback instead, re-spawn
-   spec-writer with the feedback to revise `spec.md`; the job stays in
-   `spec-review` until approved.
+   `approve-spec <id>`. If the human gives feedback instead, write it with
+   `FACTORY spec-feedback <id> "<feedback>"` (it becomes
+   `spec-feedback-N.md`), then repeat steps 3–5. Never pass feedback only
+   in the spawn prompt.
 
 ### `approve-spec <job-id>`
 Only on the human's explicit instruction. `FACTORY approve-spec <id>` marks
@@ -130,9 +139,11 @@ job is building. Then run the build loop:
 2. Spawn **test-auditor** with `base` and `round-N/`, then
    `FACTORY test-audit-done <id>` and follow `next`:
    - `rebuild` → back to step 1 (round increased).
-   - `review` → continue.
-3. Spawn the four reviewers in parallel with `base` and `round-N/`.
-4. `FACTORY round-status <id>` until `complete`. Then follow `next`:
+   - `review` → continue with the reviewers listed in `spawn`. UI may be
+     missing: the script already wrote its `N/A` because the spec says
+     `UI impact: no` and no changed file is visual. UX always runs.
+3. Spawn the reviewers from `spawn` in parallel with `base` and `round-N/`.
+4. `FACTORY round-status <id>` until `complete`, then `FACTORY close-round <id>` and follow `next`:
    - `rebuild` → back to step 1 (round increased).
    - `approver` → spawn **approver**, then `FACTORY decision <id>`.
 5. Report: job id, rounds, test-audit and review verdicts, any `warnings`, and the path to
@@ -153,7 +164,18 @@ Do not run `git commit`, `git push`, `git checkout` or `gh`.
 
 ### `rework <job-id> <note>`
 `FACTORY rework <id> "<note>"`, then continue the build loop from step 1. The
-builder reads the `rework-N.md` note; two more review rounds are allowed.
+builder reads the `rework-N.md` note; the attempt budget resets (two review
+rounds, one test-audit rebuild).
+
+### `resume <job-id>`
+`FACTORY resume <id>` prints `next`, the step to take for the job's current
+stage (for example which reviewers are still missing). Use it when a session
+was interrupted; then continue the loop from that step.
+
+### `abandon <job-id> <reason>`
+Only on the human's instruction. `FACTORY abandon <id> "<reason>"` closes the
+job so it no longer blocks other builds. Code changes stay in the worktree;
+the human decides whether to keep or discard them.
 
 ## Dashboard
 

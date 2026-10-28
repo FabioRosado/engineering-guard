@@ -201,3 +201,25 @@ within the approved architecture and D10; flag if you consider any material.
 - This changes the approved loop. It was implemented at the developer's direct
   request; the revision-3 approval does not cover it, and the record awaits the
   developer's explicit confirmation of revision 4.
+
+## Revision 5 change (developer request "fix all we have found", 2026-10-27)
+
+Implements the factory audit findings. Items marked *pending confirmation* change
+an earlier decision on the developer's instruction and should be confirmed in Align.
+
+- **D11 budget (pending confirmation):** test-audit `CHANGES` rebuilds have their own
+  budget (1 per attempt) and no longer consume the 2 review rounds. `rework` resets
+  both budgets. Board field `round_limit` is replaced by `attempt`.
+- **D5 automation (pending confirmation):** when the approved spec says `UI impact: no`
+  (on its own field line) and no changed file has a visual extension,
+  `test-audit-done` writes the UI `N/A` review itself and omits `ui` from `spawn`.
+  UX is always spawned: CLI output and messages are not detectable by extension.
+- `build-done` writes `round-N/change.patch` and `round-N/files.txt` (tracked diff
+  against `base` plus untracked files); auditors and reviewers read that snapshot.
+- New commands: `spec-feedback` (persists feedback as `spec-feedback-N.md`, returns
+  the job to `spec`), `abandon` (terminal `abandoned` stage, frees the one-active-job
+  rule), `resume` (prints the next step), and `close-round`; `round-status` no longer
+  changes the stage (it only saves reviewer progress for the dashboard).
+- Verdicts are per role: only UX/UI may be `N/A`; `CHANGES` needs a body.
+- `record-model` validates the stage; dirty-path detection uses `git status -z`.
+- Not changed: a moved `HEAD` still only warns, as approved above.

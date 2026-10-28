@@ -28,14 +28,33 @@ ROLES_DIRECTORY = SKILL_ROOT / "roles"
 
 FACTORY_DIRECTORY_NAME = ".factory"
 REVIEWERS = ("security", "ux", "ui", "code")
-VERDICTS = ("PASS", "CHANGES", "N/A")
-# Two review rounds per build attempt (initial build or human rework); after that
-# the approver escalates with whatever findings remain instead of looping forever.
-ROUNDS_PER_ATTEMPT = 2
+# Only UX and UI can be "not applicable": every change has code and a security surface,
+# so N/A from those reviewers would let a round pass with nothing reviewed.
+ALLOWED_VERDICTS = {
+    "tests": ("PASS", "CHANGES"),
+    "security": ("PASS", "CHANGES"),
+    "code": ("PASS", "CHANGES"),
+    "ux": ("PASS", "CHANGES", "N/A"),
+    "ui": ("PASS", "CHANGES", "N/A"),
+}
+# Per build attempt (initial build or human rework). Test-audit rebuilds have their own
+# budget so weak tests cannot use up the review rounds; after either budget the job
+# moves on and the approver escalates with whatever findings remain.
+REVIEW_ROUNDS_PER_ATTEMPT = 2
+TEST_REBUILDS_PER_ATTEMPT = 1
 SPEC_STATUS_LINE = re.compile(r"^\*\*Status:\*\*.*$", re.MULTILINE)
+# Anchored to the spec's own field line so a quoted draft or prose mention does not match.
+UI_IMPACT_NO = re.compile(r"^\W*UI impact\W*no\b", re.IGNORECASE | re.MULTILINE)
+# Files whose change can affect what a user sees; any of them keeps the UI review on.
+USER_FACING_SUFFIXES = (
+    ".html", ".htm", ".css", ".scss", ".sass", ".less", ".js", ".jsx", ".ts", ".tsx",
+    ".vue", ".svelte", ".astro", ".erb", ".jinja", ".j2", ".hbs", ".svg", ".png", ".jpg",
+    ".jpeg", ".gif", ".webp", ".ico",
+)
 BLOCKED_HEADER = re.compile(r"^BLOCKED\b")
 VERDICT_HEADER = re.compile(r"^VERDICT:\s*(PASS|CHANGES|N/A)\s*$")
 DECISION_HEADER = re.compile(r"^ESCALATE\b")
+TERMINAL_STAGES = ("abandoned",)
 SUPPORTED_CLIS = ("claude", "codex", "kilo")
 STAGE_TIERS = {
     "spec": "expensive",
@@ -149,6 +168,9 @@ class Factory:
     def find_job(self, board, job_id):
         for job in board["jobs"]:
             if job["id"] == job_id:
+                # Jobs created before per-attempt budgets carried a round_limit instead.
+                job.pop("round_limit", None)
+                job.setdefault("attempt", new_attempt())
                 return job
         raise FactoryError(f"unknown job {job_id}")
 
@@ -191,10 +213,62 @@ class Factory:
             raise FactoryError(f"another job is building in this worktree: {active}")
 
     def dirty_paths(self):
-        """Uncommitted paths outside .factory/ (which is excluded from Git anyway)."""
-        output = run_git(self.repository_root, "status", "--porcelain", "--untracked-files=all")
-        paths = [line[3:] for line in output.splitlines() if line.strip()]
+        """Uncommitted paths outside .factory/ (which is excluded from Git anyway).
+
+        -z output keeps paths unquoted and puts a rename's source in its own entry,
+        so "old -> new" never reaches the caller as one bogus path.
+        """
+        output = run_git(self.repository_root, "status", "--porcelain", "-z", "--untracked-files=all")
+        entries = output.split("\0")
+        paths = []
+        index = 0
+        while index < len(entries):
+            entry = entries[index]
+            index += 1
+            if not entry:
+                continue
+            status, path = entry[:2], entry[3:]
+            paths.append(path)
+            if "R" in status or "C" in status:
+                index += 1  # the next entry is the rename/copy source
         return [path for path in paths if not path.startswith(f"{FACTORY_DIRECTORY_NAME}/")]
+
+    def untracked_paths(self):
+        output = run_git(self.repository_root, "ls-files", "--others", "--exclude-standard", "-z")
+        return [path for path in output.split("\0") if path]
+
+    def write_change_snapshot(self, job):
+        """Freeze the change under review into round-N/ so every auditor and reviewer
+        sees the same diff, untracked files included, and each round leaves a record.
+        """
+        round_directory = self.job_directory(job["id"]) / f"round-{job['round']}"
+        round_directory.mkdir(exist_ok=True)
+        # Patches carry file contents in whatever encoding the repo uses, so they are
+        # handled as bytes; decoding them could crash build-done on non-UTF-8 files.
+        tracked_patch = subprocess.run(
+            ["git", "diff", "--binary", job["base"]],
+            cwd=self.repository_root, capture_output=True,
+        )
+        if tracked_patch.returncode != 0:
+            raise FactoryError(f"git diff {job['base']} failed: {tracked_patch.stderr.decode(errors='replace').strip()}")
+        patch = tracked_patch.stdout
+        tracked_files = run_git(self.repository_root, "diff", "--name-only", "-z", job["base"]).split("\0")
+        untracked = self.untracked_paths()
+        for path in untracked:
+            # --no-index exits 1 when the files differ, which is always the case here.
+            result = subprocess.run(
+                ["git", "diff", "--no-index", "--binary", "--", os.devnull, path],
+                cwd=self.repository_root, capture_output=True,
+            )
+            if result.returncode not in (0, 1):
+                raise FactoryError(
+                    f"cannot snapshot untracked file {path}: {result.stderr.decode(errors='replace').strip()}"
+                )
+            patch += result.stdout
+        (round_directory / "change.patch").write_bytes(patch)
+        changed = sorted({path for path in tracked_files if path} | set(untracked))
+        (round_directory / "files.txt").write_text("".join(f"{path}\n" for path in changed), encoding="utf-8")
+        return changed
 
     def head(self):
         return run_git(self.repository_root, "rev-parse", "HEAD").strip()
@@ -259,7 +333,7 @@ class Factory:
             "title": title.strip(),
             "stage": "spec",
             "round": 0,
-            "round_limit": 0,
+            "attempt": new_attempt(),
             "base": None,
             "test_audit": None,
             "reviews": {},
@@ -295,6 +369,21 @@ class Factory:
         self.save(board, job)
         return job
 
+    def spec_feedback(self, job_id, note):
+        """Persist human spec feedback as a file, because agents read files, not the chat."""
+        if not note.strip():
+            raise FactoryError("spec-feedback needs a note for the spec-writer")
+        board = self.load_board()
+        job = self.find_job(board, job_id)
+        self.require_stage(job, "spec-review")
+        directory = self.job_directory(job_id)
+        number = len(list(directory.glob("spec-feedback-*.md"))) + 1
+        path = directory / f"spec-feedback-{number}.md"
+        path.write_text(f"# Human spec feedback {number}\n\n{note.strip()}\n", encoding="utf-8")
+        job["stage"] = "spec"
+        self.save(board, job)
+        return {"job": job, "feedback": str(path.relative_to(self.repository_root))}
+
     def approve_spec(self, job_id):
         """Human gate (D6). Also the point where the build baseline is fixed (D9)."""
         board = self.load_board()
@@ -311,7 +400,7 @@ class Factory:
         job["base"] = self.head()
         job["stage"] = "build"
         job["round"] = 1
-        job["round_limit"] = ROUNDS_PER_ATTEMPT
+        job["attempt"] = new_attempt()
         self.save(board, job)
         return job
 
@@ -352,7 +441,7 @@ class Factory:
                 "builder produced no changes since the base commit; re-spawn the builder, "
                 "or have it start build.md with BLOCKED: <reason> if it cannot proceed"
             )
-        (self.job_directory(job_id) / f"round-{job['round']}").mkdir(exist_ok=True)
+        job["changed_files"] = self.write_change_snapshot(job)
         job["stage"] = "test-audit"
         job["test_audit"] = "pending"
         job["reviews"] = {}
@@ -364,78 +453,137 @@ class Factory:
         """Gate the reviewers on test quality (decision D11).
 
         Weak tests are cheaper to fix before four reviewers spend a round on them,
-        so CHANGES sends the job straight back to the builder. It uses the same
-        round budget as reviews; at the limit the reviewers still run and the
-        unresolved audit is carried as a warning to the approver and the human.
+        so CHANGES sends the job straight back to the builder. Those rebuilds have
+        their own small budget so they never consume the review rounds; once it is
+        spent the reviewers still run and the unresolved audit is carried as a
+        warning to the approver and the human.
         """
         board = self.load_board()
         job = self.find_job(board, job_id)
         self.require_stage(job, "test-audit")
         path = self.require_file(job_id, f"round-{job['round']}/test-audit.md")
-        verdict = parse_verdict(path.read_text(encoding="utf-8"))
-        if verdict not in ("PASS", "CHANGES"):
-            raise FactoryError(
-                f"{path.relative_to(self.repository_root)} must start with VERDICT: PASS or VERDICT: CHANGES"
-            )
+        verdict, problem = check_verdict_file(path.read_text(encoding="utf-8"), "tests")
+        if problem:
+            raise FactoryError(f"{path.relative_to(self.repository_root)}: {problem}")
         job["test_audit"] = verdict
         job["warnings"] = self.head_warnings(job)
-        if verdict == "CHANGES" and job["round"] < job["round_limit"]:
+        attempt = job["attempt"]
+        if verdict == "CHANGES" and attempt["test_rebuilds"] < TEST_REBUILDS_PER_ATTEMPT:
+            attempt["test_rebuilds"] += 1
             job["history"].append({"round": job["round"], "test_audit": verdict, "reviews": {}})
             job["round"] += 1
             job["stage"] = "build"
-            next_action = "rebuild"
-        else:
-            if verdict == "CHANGES":
-                job["warnings"].append(f"test audit still requests changes after round {job['round']}")
-            job["stage"] = "review"
-            job["reviews"] = {reviewer: "pending" for reviewer in REVIEWERS}
-            next_action = "review"
+            self.save(board, job)
+            return {"job": job, "next": "rebuild"}
+
+        if verdict == "CHANGES":
+            job["warnings"].append(f"test audit still requests changes after round {job['round']}")
+        job["stage"] = "review"
+        job["reviews"] = {reviewer: "pending" for reviewer in REVIEWERS}
+        auto_not_applicable = self.write_automatic_not_applicable_reviews(job)
+        for reviewer in auto_not_applicable:
+            job["reviews"][reviewer] = "N/A"
         self.save(board, job)
-        return {"job": job, "next": next_action}
+        return {
+            "job": job,
+            "next": "review",
+            "spawn": [reviewer for reviewer in REVIEWERS if reviewer not in auto_not_applicable],
+        }
 
-    def round_status(self, job_id):
-        """WAIT FOR ALL: the round completes only when every reviewer file is valid.
+    def write_automatic_not_applicable_reviews(self, job):
+        """Skip the UI agent when it could only answer N/A (decision D5).
 
-        On completion this also advances the job: back to build when changes are
-        requested and rounds remain, otherwise on to the approver.
+        Both conditions the UI role uses must hold: the approved spec says
+        `UI impact: no` and no changed file can affect what a user sees. UX is
+        never skipped: CLI output and messages in any source file are UX, and file
+        extensions cannot detect that.
         """
-        board = self.load_board()
-        job = self.find_job(board, job_id)
-        self.require_stage(job, "review")
-        round_directory = self.job_directory(job_id) / f"round-{job['round']}"
+        spec = self.require_file(job["id"], "spec.md").read_text(encoding="utf-8")
+        if not UI_IMPACT_NO.search(spec):
+            return []
+        user_facing = [
+            path for path in job.get("changed_files", [])
+            if path.lower().endswith(USER_FACING_SUFFIXES)
+        ]
+        if user_facing:
+            return []
+        round_directory = self.job_directory(job["id"]) / f"round-{job['round']}"
+        (round_directory / "review-ui.md").write_text(
+            "VERDICT: N/A\n"
+            "Written by factory_board.py: the spec says `UI impact: no` and no changed "
+            "file is visual (see files.txt).\n",
+            encoding="utf-8",
+        )
+        return ["ui"]
+
+    def read_reviews(self, job):
+        round_directory = self.job_directory(job["id"]) / f"round-{job['round']}"
         reviews = {}
-        invalid = []
+        invalid = {}
         for reviewer in REVIEWERS:
             path = round_directory / f"review-{reviewer}.md"
             if not path.is_file():
                 reviews[reviewer] = "pending"
                 continue
-            verdict = parse_verdict(path.read_text(encoding="utf-8"))
-            if verdict is None:
+            verdict, problem = check_verdict_file(path.read_text(encoding="utf-8"), reviewer)
+            if problem:
                 reviews[reviewer] = "invalid"
-                invalid.append(str(path.relative_to(self.repository_root)))
+                invalid[str(path.relative_to(self.repository_root))] = problem
             else:
                 reviews[reviewer] = verdict
+        return reviews, invalid
+
+    def round_status(self, job_id):
+        """Current review round progress; never changes the stage, so safe to repeat.
+
+        It still saves per-reviewer verdicts so the dashboard shows the round live.
+        """
+        board = self.load_board()
+        job = self.find_job(board, job_id)
+        self.require_stage(job, "review")
+        reviews, invalid = self.read_reviews(job)
+        job["reviews"] = reviews
+        self.save(board, job)
+        complete = all(verdict not in ("pending", "invalid") for verdict in reviews.values())
+        return {
+            "reviews": reviews,
+            "complete": complete,
+            "invalid": invalid,
+            "next": "close-round" if complete else "wait",
+            "warnings": self.head_warnings(job),
+        }
+
+    def close_round(self, job_id):
+        """WAIT FOR ALL: the round closes only when every reviewer file is valid.
+
+        Closing advances the job: back to build when changes are requested and
+        review rounds remain in this attempt, otherwise on to the approver.
+        """
+        board = self.load_board()
+        job = self.find_job(board, job_id)
+        self.require_stage(job, "review")
+        reviews, invalid = self.read_reviews(job)
+        waiting = [reviewer for reviewer, verdict in reviews.items() if verdict in ("pending", "invalid")]
+        if waiting:
+            raise FactoryError(f"round {job['round']} is not complete; waiting on {waiting}; invalid: {invalid}")
         job["reviews"] = reviews
         job["warnings"] = self.head_warnings(job)
         if job["test_audit"] == "CHANGES":
             job["warnings"].append(f"test audit still requests changes after round {job['round']}")
-
-        complete = all(verdict in VERDICTS for verdict in reviews.values())
-        next_action = "wait"
-        if complete:
-            job["history"].append(
-                {"round": job["round"], "test_audit": job["test_audit"], "reviews": dict(reviews)}
-            )
-            if "CHANGES" in reviews.values() and job["round"] < job["round_limit"]:
-                job["round"] += 1
-                job["stage"] = "build"
-                next_action = "rebuild"
-            else:
-                job["stage"] = "approver"
-                next_action = "approver"
+        job["history"].append(
+            {"round": job["round"], "test_audit": job["test_audit"], "reviews": dict(reviews)}
+        )
+        attempt = job["attempt"]
+        attempt["review_rounds"] += 1
+        if "CHANGES" in reviews.values() and attempt["review_rounds"] < REVIEW_ROUNDS_PER_ATTEMPT:
+            job["round"] += 1
+            job["stage"] = "build"
+            next_action = "rebuild"
+        else:
+            job["stage"] = "approver"
+            next_action = "approver"
         self.save(board, job)
-        return {"job": job, "complete": complete, "next": next_action, "invalid": invalid}
+        return {"job": job, "next": next_action}
 
     def decision(self, job_id):
         """Humans give final approval, so the only accepted decision is ESCALATE."""
@@ -463,7 +611,7 @@ class Factory:
         # (and repairs jobs approved before approve-spec recorded it in spec.md).
         self.mark_spec_approved(job_id)
         job["round"] += 1
-        job["round_limit"] = job["round"] + ROUNDS_PER_ATTEMPT - 1
+        job["attempt"] = new_attempt()
         note_path = self.job_directory(job_id) / f"rework-{job['round']}.md"
         note_path.write_text(f"# Human rework note (before round {job['round']})\n\n{note.strip()}\n", encoding="utf-8")
         job["stage"] = "build"
@@ -471,7 +619,53 @@ class Factory:
         self.save(board, job)
         return job
 
+    def abandon(self, job_id, reason):
+        """Close a job for good so an interrupted run cannot block every later build.
+
+        The one-active-job rule (D9) otherwise leaves a crashed job holding the
+        worktree with no way out except hand-editing board.json. Code changes in the
+        worktree are left untouched: the human decides whether to keep them.
+        """
+        if not reason.strip():
+            raise FactoryError("abandon needs a reason")
+        board = self.load_board()
+        job = self.find_job(board, job_id)
+        if job["stage"] in TERMINAL_STAGES:
+            raise FactoryError(f"job {job_id} is already {job['stage']}")
+        job["history"].append({"round": job["round"], "abandoned_from": job["stage"], "reason": reason.strip()})
+        job["stage"] = "abandoned"
+        job["warnings"] = [f"abandoned: {reason.strip()}"]
+        self.save(board, job)
+        return job
+
+    def resume(self, job_id):
+        """Tell a fresh orchestrator session what to do next for an interrupted job."""
+        board = self.load_board()
+        job = self.find_job(board, job_id)
+        round_folder = f".factory/jobs/{job_id}/round-{job['round']}/"
+        stage = job["stage"]
+        if stage == "review":
+            reviews, invalid = self.read_reviews(job)
+            missing = [reviewer for reviewer, verdict in reviews.items() if verdict in ("pending", "invalid")]
+            action = (
+                f"spawn reviewers {missing} for {round_folder}, then close-round"
+                if missing else "close-round"
+            )
+        else:
+            action = {
+                "spec": "spawn spec-writer (it reads feature.md and any spec-feedback-*.md), then spec-written",
+                "spec-review": "stop: the human reads spec.md and runs approve-spec or gives spec feedback",
+                "build": f"spawn a fresh builder for round {job['round']}, then build-done",
+                "test-audit": f"spawn test-auditor for {round_folder}, then test-audit-done",
+                "approver": "spawn approver, then decision",
+                "needs-human": "stop: the human reads decision.md and runs approve or rework",
+                "abandoned": "nothing: the job is abandoned",
+            }[stage]
+        return {"job": job, "next": action, "warnings": self.head_warnings(job)}
+
     def record_model(self, job_id, stage, model):
+        if stage not in STAGE_TIERS:
+            raise FactoryError(f"unknown stage '{stage}', expected one of {list(STAGE_TIERS)}")
         board = self.load_board()
         job = self.find_job(board, job_id)
         job["models"][stage] = model
@@ -550,9 +744,23 @@ def first_content_line(text):
     return ""
 
 
-def parse_verdict(text):
+def new_attempt():
+    return {"review_rounds": 0, "test_rebuilds": 0}
+
+
+def check_verdict_file(text, role):
+    """Return (verdict, problem); problem is None when the file is acceptable for role."""
+    allowed = ALLOWED_VERDICTS[role]
+    expected = " or ".join(f"VERDICT: {verdict}" for verdict in allowed)
     match = VERDICT_HEADER.match(first_content_line(text))
-    return match.group(1) if match else None
+    if not match or match.group(1) not in allowed:
+        return None, f"must start with {expected}"
+    verdict = match.group(1)
+    # A bare CHANGES would send the builder back with nothing to fix.
+    body = text.strip().split("\n", 1)[1].strip() if "\n" in text.strip() else ""
+    if verdict == "CHANGES" and not body:
+        return None, "VERDICT: CHANGES needs at least one finding below the verdict line"
+    return verdict, None
 
 
 def build_parser():
@@ -565,11 +773,15 @@ def build_parser():
     new = commands.add_parser("new")
     new.add_argument("title", nargs="?")
     new.add_argument("--from-backlog", action="store_true")
-    for name in ("spec-written", "approve-spec", "build-done", "test-audit-done", "round-status", "decision"):
+    for name in (
+        "spec-written", "approve-spec", "build-done", "test-audit-done",
+        "round-status", "close-round", "decision", "resume",
+    ):
         commands.add_parser(name).add_argument("job_id")
-    rework = commands.add_parser("rework")
-    rework.add_argument("job_id")
-    rework.add_argument("note")
+    for name, text in (("rework", "note"), ("spec-feedback", "note"), ("abandon", "reason")):
+        parser_for_note = commands.add_parser(name)
+        parser_for_note.add_argument("job_id")
+        parser_for_note.add_argument(text)
     record = commands.add_parser("record-model")
     record.add_argument("job_id")
     record.add_argument("stage")
@@ -602,10 +814,18 @@ def main(argv=None):
             result = factory.test_audit_done(arguments.job_id)
         elif command == "round-status":
             result = factory.round_status(arguments.job_id)
+        elif command == "close-round":
+            result = factory.close_round(arguments.job_id)
         elif command == "decision":
             result = factory.decision(arguments.job_id)
         elif command == "rework":
             result = factory.rework(arguments.job_id, arguments.note)
+        elif command == "spec-feedback":
+            result = factory.spec_feedback(arguments.job_id, arguments.note)
+        elif command == "abandon":
+            result = factory.abandon(arguments.job_id, arguments.reason)
+        elif command == "resume":
+            result = factory.resume(arguments.job_id)
         elif command == "record-model":
             result = factory.record_model(arguments.job_id, arguments.stage, arguments.model)
         elif command == "show":
