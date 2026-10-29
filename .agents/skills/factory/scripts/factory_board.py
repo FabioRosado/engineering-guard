@@ -14,9 +14,12 @@ import argparse
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,7 +39,15 @@ ALLOWED_VERDICTS = {
     "code": ("PASS", "CHANGES"),
     "ux": ("PASS", "CHANGES", "N/A"),
     "ui": ("PASS", "CHANGES", "N/A"),
+    "stride": ("PASS", "CHANGES"),
 }
+# Roles whose CHANGES verdict must cite at least one CRITICAL/HIGH finding (decision
+# SD1 in decisions/stride-threat-model.md): a MEDIUM/LOW/hardening-only report should
+# pass with notes instead of spending a review round, because every actionable finding
+# previously blocked a round regardless of severity.
+SEVERITY_GATED_ROLES = {"security", "stride"}
+SEVERITY_LINE = re.compile(r"^SEVERITY:\s*(CRITICAL|HIGH|MEDIUM|LOW|INFO)\s*$", re.MULTILINE)
+BLOCKING_SEVERITIES = {"CRITICAL", "HIGH"}
 # Per build attempt (initial build or human rework). Test-audit rebuilds have their own
 # budget so weak tests cannot use up the review rounds; after either budget the job
 # moves on and the approver escalates with whatever findings remain.
@@ -55,6 +66,23 @@ BLOCKED_HEADER = re.compile(r"^BLOCKED\b")
 VERDICT_HEADER = re.compile(r"^VERDICT:\s*(PASS|CHANGES|N/A)\s*$")
 DECISION_HEADER = re.compile(r"^ESCALATE\b")
 TERMINAL_STAGES = ("abandoned",)
+# Full ordered pipeline, including human-gate and terminal stages, for display
+# surfaces (dashboards) that need every stage rather than just ACTIVE_STAGES.
+# Keep in sync with dashboard.html's STAGES array and HUMAN_STAGES set, and with
+# decisions/central-factory-dashboard.md's documented column order — this is the
+# single Python source those lists are derived from.
+PIPELINE_STAGES = (
+    ("spec", "Spec"),
+    ("spec-review", "Spec Review"),
+    ("build", "Build"),
+    ("test-audit", "Test Audit"),
+    ("review", "Review"),
+    ("stride-review", "STRIDE"),
+    ("approver", "Approver"),
+    ("needs-human", "Needs Human"),
+    ("abandoned", "Abandoned"),
+)
+HUMAN_GATE_STAGES = ("spec-review", "needs-human")
 SUPPORTED_CLIS = ("claude", "codex", "kilo")
 STAGE_TIERS = {
     "spec": "expensive",
@@ -64,9 +92,10 @@ STAGE_TIERS = {
     "ux": "cheap",
     "ui": "cheap",
     "code": "cheap",
+    "stride": "expensive",
     "approver": "expensive",
 }
-ACTIVE_STAGES = ("build", "test-audit", "review", "approver")
+ACTIVE_STAGES = ("build", "test-audit", "review", "stride-review", "approver")
 # Only the builder changes the implementation; every other role writes just its report.
 EDITING_ROLES = {"builder"}
 ROLE_STAGES = {
@@ -77,6 +106,7 @@ ROLE_STAGES = {
     "review-ux": "ux",
     "review-ui": "ui",
     "review-code": "code",
+    "review-stride": "stride",
     "approver": "approver",
 }
 # Bind to loopback: specs and security reviews can describe unfixed vulnerabilities.
@@ -88,9 +118,83 @@ One feature per line. `next` takes the first unchecked item.
 - [ ] Example: describe a feature here
 """
 
+# Central factory server configuration
+CENTRAL_FACTORY_HOST = "127.0.0.1"
+CENTRAL_FACTORY_PORT = 5173
+CENTRAL_FACTORY_SYNC_URL = f"http://{CENTRAL_FACTORY_HOST}:{CENTRAL_FACTORY_PORT}/api/jobs/sync"
+CENTRAL_FACTORY_PUSH_TIMEOUT = 2  # seconds
+
 
 class FactoryError(Exception):
     """A factory rule was violated; the message tells the orchestrator what is missing."""
+
+
+def _collect_job_files(job_directory):
+    """Collect all markdown files from a job directory with their content.
+    
+    Returns a dict mapping relative file paths to their content.
+    """
+    files = {}
+    if not job_directory.exists():
+        return files
+    
+    for file_path in sorted(job_directory.rglob("*.md")):
+        try:
+            relative_path = file_path.relative_to(job_directory)
+            content = file_path.read_text(encoding="utf-8")
+            files[str(relative_path)] = content
+        except Exception as e:
+            print(f"Warning: failed to read {file_path}: {e}", file=sys.stderr)
+    
+    return files
+
+
+def _push_to_central_server(board, job, repository_root):
+    """Push job state to central factory server (non-blocking).
+    
+    Collects all markdown files from the job directory and sends them to the
+    central server at CENTRAL_FACTORY_SYNC_URL. Network failures are logged but
+    do not block factory progress (best-effort notification).
+    """
+    if os.environ.get("FACTORY_DISABLE_CENTRAL_SYNC"):
+        # Tests and throwaway repos must not pollute the real dashboard store.
+        return
+    try:
+        job_directory = repository_root / FACTORY_DIRECTORY_NAME / "jobs" / job["id"]
+        files = _collect_job_files(job_directory)
+        
+        # Prepare payload: repository context + job state + markdown files
+        payload = {
+            "repository": Path(repository_root).name,
+            "repo_path": str(repository_root),
+            "worktree_path": str(repository_root),
+            "job": {
+                **{k: v for k, v in job.items() if k != "files"},  # Exclude old files list
+                "files": files,
+            },
+        }
+        
+        # Send POST request with timeout
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            CENTRAL_FACTORY_SYNC_URL,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        
+        try:
+            with urllib.request.urlopen(request, timeout=CENTRAL_FACTORY_PUSH_TIMEOUT) as response:
+                if response.status == 200:
+                    print(f"Central server: synced job {job['id']}", file=sys.stderr)
+                else:
+                    print(f"Central server: sync returned {response.status}", file=sys.stderr)
+        except (urllib.error.URLError, socket.timeout) as e:
+            # Non-blocking: central server unavailable or unreachable
+            print(f"Central server: push failed (will continue): {type(e).__name__}", file=sys.stderr)
+    except Exception as e:
+        # Catch any unexpected errors and log without blocking
+        print(f"Central server: push error (will continue): {e}", file=sys.stderr)
 
 
 def run_git(repository_root, *arguments):
@@ -171,13 +275,15 @@ class Factory:
                 # Jobs created before per-attempt budgets carried a round_limit instead.
                 job.pop("round_limit", None)
                 job.setdefault("attempt", new_attempt())
+                # Jobs created before the stride-review stage have no field for it yet.
+                job.setdefault("stride", None)
                 return job
         raise FactoryError(f"unknown job {job_id}")
 
     def job_directory(self, job_id):
         return self.directory / "jobs" / job_id
 
-    def save(self, board, job):
+    def save(self, board, job, push=True):
         """Persist the board after refreshing the job's file index for the dashboard."""
         directory = self.job_directory(job["id"])
         job["files"] = sorted(
@@ -185,6 +291,11 @@ class Factory:
         )
         job["updated"] = utc_now()
         self.write_json(self.board_path, board)
+        if push:
+            # Push job state to central factory server (non-blocking). The central
+            # server itself archives by importing this module, and pushing from
+            # inside that request would deadlock its single-threaded loop.
+            _push_to_central_server(board, job, self.repository_root)
 
     @staticmethod
     def require_stage(job, *allowed):
@@ -337,6 +448,7 @@ class Factory:
             "base": None,
             "test_audit": None,
             "reviews": {},
+            "stride": None,
             "history": [],
             "models": {},
             "warnings": [],
@@ -557,7 +669,8 @@ class Factory:
         """WAIT FOR ALL: the round closes only when every reviewer file is valid.
 
         Closing advances the job: back to build when changes are requested and
-        review rounds remain in this attempt, otherwise on to the approver.
+        review rounds remain in this attempt, otherwise on to the whole-repo STRIDE
+        sweep (stride-review), which runs once per job rather than once per round.
         """
         board = self.load_board()
         job = self.find_job(board, job_id)
@@ -580,10 +693,47 @@ class Factory:
             job["stage"] = "build"
             next_action = "rebuild"
         else:
-            job["stage"] = "approver"
-            next_action = "approver"
+            job["stage"] = "stride-review"
+            job["stride"] = "pending"
+            next_action = "stride-review"
         self.save(board, job)
         return {"job": job, "next": next_action}
+
+    def stride_review_done(self, job_id):
+        """Whole-repo STRIDE sweep, gating the approver (decisions SD5-SD7).
+
+        Unlike security/ux/ui/code, STRIDE evaluates the job's full accumulated diff
+        against a persisted, whole-repo trust-zone profile rather than one round's
+        diff, so it runs once per job here rather than once per review round. A
+        CHANGES verdict (a new or newly-confirmed CRITICAL/HIGH threat touching the
+        changed component) sends the job back to the builder and consumes the same
+        review-round budget as the other four reviewers, so the two mechanisms
+        cannot together exceed the attempt's total review-round allowance.
+        """
+        board = self.load_board()
+        job = self.find_job(board, job_id)
+        self.require_stage(job, "stride-review")
+        path = self.require_file(job_id, f"round-{job['round']}/review-stride.md")
+        verdict, problem = check_verdict_file(path.read_text(encoding="utf-8"), "stride")
+        if problem:
+            raise FactoryError(f"{path.relative_to(self.repository_root)}: {problem}")
+        job["stride"] = verdict
+        job["warnings"] = self.head_warnings(job)
+        attempt = job["attempt"]
+        if verdict == "CHANGES" and attempt["review_rounds"] < REVIEW_ROUNDS_PER_ATTEMPT:
+            attempt["review_rounds"] += 1
+            job["history"].append({"round": job["round"], "stride": verdict})
+            job["round"] += 1
+            job["stage"] = "build"
+            self.save(board, job)
+            return {"job": job, "next": "rebuild"}
+
+        if verdict == "CHANGES":
+            job["warnings"].append(f"STRIDE review still requests changes after round {job['round']}")
+        job["history"].append({"round": job["round"], "stride": verdict})
+        job["stage"] = "approver"
+        self.save(board, job)
+        return {"job": job, "next": "approver"}
 
     def decision(self, job_id):
         """Humans give final approval, so the only accepted decision is ESCALATE."""
@@ -619,24 +769,42 @@ class Factory:
         self.save(board, job)
         return job
 
-    def abandon(self, job_id, reason):
+    def _close(self, job_id, reason, history_key, push=True, allowed_stages=None):
+        if not reason.strip():
+            raise FactoryError(f"{history_key.split('_')[0]} needs a reason")
+        board = self.load_board()
+        job = self.find_job(board, job_id)
+        if job["stage"] in TERMINAL_STAGES:
+            raise FactoryError(f"job {job_id} is already {job['stage']}")
+        if allowed_stages:
+            self.require_stage(job, *allowed_stages)
+        label = history_key.split("_")[0]
+        job["history"].append({"round": job["round"], history_key: job["stage"], "reason": reason.strip()})
+        job["stage"] = "abandoned"
+        job["warnings"] = [f"{label}: {reason.strip()}"]
+        self.save(board, job, push=push)
+        return job
+
+    def abandon(self, job_id, reason, push=True):
         """Close a job for good so an interrupted run cannot block every later build.
 
         The one-active-job rule (D9) otherwise leaves a crashed job holding the
         worktree with no way out except hand-editing board.json. Code changes in the
         worktree are left untouched: the human decides whether to keep them.
         """
-        if not reason.strip():
-            raise FactoryError("abandon needs a reason")
-        board = self.load_board()
-        job = self.find_job(board, job_id)
-        if job["stage"] in TERMINAL_STAGES:
-            raise FactoryError(f"job {job_id} is already {job['stage']}")
-        job["history"].append({"round": job["round"], "abandoned_from": job["stage"], "reason": reason.strip()})
-        job["stage"] = "abandoned"
-        job["warnings"] = [f"abandoned: {reason.strip()}"]
-        self.save(board, job)
-        return job
+        return self._close(job_id, reason, "abandoned_from", push=push)
+
+    def archive(self, job_id, reason="approved", push=True):
+        """Close an approved job and move it to the Archive tab.
+
+        Approval is the human saying the work is ready to commit, so the job no
+        longer needs to sit in needs-human. It shares the terminal `abandoned`
+        stage (the dashboard's archive bucket) but records `archived_from` in
+        history so an approval is distinguishable from a crash cleanup.
+        """
+        return self._close(
+            job_id, reason or "approved", "archived_from", push=push, allowed_stages=("needs-human",)
+        )
 
     def resume(self, job_id):
         """Tell a fresh orchestrator session what to do next for an interrupted job."""
@@ -657,9 +825,10 @@ class Factory:
                 "spec-review": "stop: the human reads spec.md and runs approve-spec or gives spec feedback",
                 "build": f"spawn a fresh builder for round {job['round']}, then build-done",
                 "test-audit": f"spawn test-auditor for {round_folder}, then test-audit-done",
+                "stride-review": f"spawn the stride reviewer for {round_folder}, then stride-review-done",
                 "approver": "spawn approver, then decision",
                 "needs-human": "stop: the human reads decision.md and runs approve or rework",
-                "abandoned": "nothing: the job is abandoned",
+                "abandoned": "nothing: the job is closed (archived or abandoned)",
             }[stage]
         return {"job": job, "next": action, "warnings": self.head_warnings(job)}
 
@@ -760,6 +929,17 @@ def check_verdict_file(text, role):
     body = text.strip().split("\n", 1)[1].strip() if "\n" in text.strip() else ""
     if verdict == "CHANGES" and not body:
         return None, "VERDICT: CHANGES needs at least one finding below the verdict line"
+    if verdict == "CHANGES" and role in SEVERITY_GATED_ROLES:
+        # Severity floor (decision SD1): a round should only be sent back to the builder
+        # for a CRITICAL/HIGH finding. MEDIUM/LOW/hardening-only findings previously
+        # blocked a round the same way a CRITICAL did, because only the verdict header
+        # was ever checked; reviewers now report those under PASS instead.
+        severities = set(SEVERITY_LINE.findall(body))
+        if not severities & BLOCKING_SEVERITIES:
+            return None, (
+                "VERDICT: CHANGES requires a finding with 'SEVERITY: CRITICAL' or "
+                "'SEVERITY: HIGH'; report MEDIUM/LOW/INFO findings under VERDICT: PASS instead"
+            )
     return verdict, None
 
 
@@ -775,13 +955,16 @@ def build_parser():
     new.add_argument("--from-backlog", action="store_true")
     for name in (
         "spec-written", "approve-spec", "build-done", "test-audit-done",
-        "round-status", "close-round", "decision", "resume",
+        "round-status", "close-round", "stride-review-done", "decision", "resume",
     ):
         commands.add_parser(name).add_argument("job_id")
     for name, text in (("rework", "note"), ("spec-feedback", "note"), ("abandon", "reason")):
         parser_for_note = commands.add_parser(name)
         parser_for_note.add_argument("job_id")
         parser_for_note.add_argument(text)
+    archive = commands.add_parser("archive")
+    archive.add_argument("job_id")
+    archive.add_argument("reason", nargs="?", default="approved")
     record = commands.add_parser("record-model")
     record.add_argument("job_id")
     record.add_argument("stage")
@@ -816,6 +999,8 @@ def main(argv=None):
             result = factory.round_status(arguments.job_id)
         elif command == "close-round":
             result = factory.close_round(arguments.job_id)
+        elif command == "stride-review-done":
+            result = factory.stride_review_done(arguments.job_id)
         elif command == "decision":
             result = factory.decision(arguments.job_id)
         elif command == "rework":
@@ -824,6 +1009,8 @@ def main(argv=None):
             result = factory.spec_feedback(arguments.job_id, arguments.note)
         elif command == "abandon":
             result = factory.abandon(arguments.job_id, arguments.reason)
+        elif command == "archive":
+            result = factory.archive(arguments.job_id, arguments.reason)
         elif command == "resume":
             result = factory.resume(arguments.job_id)
         elif command == "record-model":

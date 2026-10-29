@@ -21,6 +21,10 @@ the spec, find the test that proves it and ask:
 - Do the tests actually pass? Run the repo's test command and record the
   exact command and pass/fail counts: reviewers reuse your results instead of
   re-running the suite.
+- Did any previously passing test change assertion or get deleted/skipped to
+  accommodate this change, without a matching acceptance criterion requiring
+  that behaviour change? List any such test: file:line, what it asserted
+  before, and whether the spec calls for the new behaviour.
 
 The first line of the file must be exactly one of:
 

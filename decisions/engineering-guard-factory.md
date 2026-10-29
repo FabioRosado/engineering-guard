@@ -24,8 +24,9 @@ visual dashboard.
    all → rework (≤2 rounds) → approver → `needs-human`.
 4. Every review file starts with `VERDICT: PASS|CHANGES|N/A`; `decision.md`
    always starts with `ESCALATE`.
-5. `approve <id>` is read-only: outputs a suggested branch name, commit
-   message and PR description. No commit, push or merge.
+5. `approve <id>` is read-only on the code: outputs a suggested branch name,
+   commit message and PR description, then archives the job. No commit, push
+   or merge.
 6. `rework <id> <note>` reopens the build with the note as extra input.
 7. Dashboard renders board.json stages, review chips per round, highlights
    `spec-review` and `needs-human`, and opens job markdown files.
@@ -60,7 +61,7 @@ visual dashboard.
 | D5 | UX and UI reviewers are conditional (`N/A` when no UI is touched). |
 | D6 | Spec is human-gated; loop runs only after spec approval. |
 | D7 | Add Claude Code support. |
-| D8 | `approve` is read-only: suggests branch name (repo conventions), commit message, PR description. Human commits/pushes. |
+| D8 | `approve` is read-only on the code: suggests branch name (repo conventions), commit message, PR description, then archives the job. Human commits/pushes. |
 | D10 | All factory artifacts are local dev tooling and must never be committed to the target repo. `.factory/` is excluded via `.git/info/exclude` (local, not `.gitignore`, so the target repo is not modified). Dashboard, presets and role files ship with the skill package and are copied into `.factory/` on first run. |
 | D9 | Builder changes stay uncommitted on the current branch; no factory branch. Factory refuses to start a build on a dirty worktree (except `.factory/`). |
 
@@ -138,7 +139,8 @@ models <preset> | <expensive> <cheap>
 <feature>
 next
 approve-spec <job-id>
-approve <job-id>            # read-only suggestion (D8)
+approve <job-id>            # suggestion + archive (D8)
+archive <job-id> [reason]
 rework <job-id> <note>
 ```
 
@@ -202,6 +204,38 @@ within the approved architecture and D10; flag if you consider any material.
   request; the revision-3 approval does not cover it, and the record awaits the
   developer's explicit confirmation of revision 4.
 
+## Revision 6 change (STRIDE integration, 2026-10-28)
+
+Implements `decisions/stride-threat-model.md` (approved 2026-10-28). Adds a
+new sequential `stride` stage and a severity floor on the blocking reviewers.
+Full rationale, evidence and alternatives live in that record; this entry is
+a pointer plus the state-machine summary.
+
+- **New stage `stride-review`:** runs once per job, after `close-round` sends
+  all four reviewers to PASS/N/A, before the approver — not once per round,
+  because it evaluates the whole repository's trust-zone model
+  (`.agents/skills/stride/SKILL.md`) rather than one round's diff. Its
+  `CHANGES` verdict sends the job back to `build` and consumes the same
+  `attempt.review_rounds` budget as security/ux/ui/code (`stride_review_done`
+  in `factory_board.py`), so the two mechanisms share one 2-round cap per
+  attempt rather than adding a separate budget.
+- **Severity floor:** `check_verdict_file` now rejects a `CHANGES` verdict
+  from the `security` or `stride` roles unless the body cites a finding with
+  `SEVERITY: CRITICAL` or `SEVERITY: HIGH`. Previously any actionable finding
+  blocked a round regardless of severity; MEDIUM/LOW/hardening-only findings
+  now pass with notes instead. `ux`, `ui`, `code` and `tests` are unchanged.
+- New role file `roles/review-stride.md`; new board command
+  `stride-review-done`; `STAGE_TIERS["stride"] = "expensive"`;
+  `ACTIVE_STAGES` and `ROLE_STAGES` updated so the one-job-at-a-time rule and
+  `install-claude` cover the new stage.
+- STRIDE's profile and living threat register persist outside `.factory/jobs/<id>/`,
+  at a separate git-excluded location the standalone `stride` skill chooses
+  and records in its own profile file (decision SD4); they survive beyond a
+  single job, unlike every other role's report.
+- Dashboard: added a `stride-review` column and a per-job STRIDE chip
+  (`assets/dashboard.html`), since the existing hardcoded `STAGES` list and
+  per-round-only reviewer chip would otherwise hide jobs in this stage.
+
 ## Revision 5 change (developer request "fix all we have found", 2026-10-27)
 
 Implements the factory audit findings. Items marked *pending confirmation* change
@@ -217,9 +251,11 @@ an earlier decision on the developer's instruction and should be confirmed in Al
 - `build-done` writes `round-N/change.patch` and `round-N/files.txt` (tracked diff
   against `base` plus untracked files); auditors and reviewers read that snapshot.
 - New commands: `spec-feedback` (persists feedback as `spec-feedback-N.md`, returns
-  the job to `spec`), `abandon` (terminal `abandoned` stage, frees the one-active-job
-  rule), `resume` (prints the next step), and `close-round`; `round-status` no longer
-  changes the stage (it only saves reviewer progress for the dashboard).
+  the job to `spec`), `archive` (closes an approved `needs-human` job into the
+  Archive, used by `approve` and the dashboard), `abandon` (terminal `abandoned`
+  stage, frees the one-active-job rule), `resume` (prints the next step), and
+  `close-round`; `round-status` no longer changes the stage (it only saves
+  reviewer progress for the dashboard).
 - Verdicts are per role: only UX/UI may be `N/A`; `CHANGES` needs a body.
 - `record-model` validates the stage; dirty-path detection uses `git status -z`.
 - Not changed: a moved `HEAD` still only warns, as approved above.

@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,7 @@ class FactoryBoardTests(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, str(BOARD_SCRIPT), *arguments],
             cwd=self.repo, capture_output=True, text=True,
+            env={**os.environ, "FACTORY_DISABLE_CENTRAL_SYNC": "1"},
         )
         output = json.loads(result.stdout)
         if expect_error:
@@ -90,7 +92,24 @@ class FactoryBoardTests(unittest.TestCase):
 
     def write_reviews(self, job_id, round_number, verdicts):
         for reviewer, verdict in verdicts.items():
-            self.job_file(job_id, f"round-{round_number}/review-{reviewer}.md", f"VERDICT: {verdict}\n\nNotes.\n")
+            body = "Notes.\n"
+            # security/stride CHANGES must cite a CRITICAL/HIGH finding (severity floor);
+            # tests that only care about the round mechanics use this default finding.
+            if verdict == "CHANGES" and reviewer in ("security", "stride"):
+                body = "SEVERITY: HIGH\nPlaceholder finding for round mechanics.\n"
+            self.job_file(job_id, f"round-{round_number}/review-{reviewer}.md", f"VERDICT: {verdict}\n\n{body}")
+
+    def pass_stride_review(self, job_id, round_number):
+        """Reach the approver from stride-review with a PASS, as most tests need."""
+        self.job_file(job_id, f"round-{round_number}/review-stride.md", "VERDICT: PASS\n")
+        return self.factory("stride-review-done", job_id)
+
+    def close_round_to_approver(self, job_id, round_number):
+        """close-round now stops at stride-review; most tests just want the approver."""
+        self.assertEqual(self.factory("close-round", job_id)["next"], "stride-review")
+        result = self.pass_stride_review(job_id, round_number)
+        self.assertEqual(result["next"], "approver")
+        return result
 
     def test_factory_output_is_excluded_locally_without_touching_tracked_files(self):
         self.factory("init")
@@ -180,7 +199,7 @@ class FactoryBoardTests(unittest.TestCase):
         self.factory("round-status", job_id)
         status = self.factory("round-status", job_id)
         self.assertEqual((status["complete"], status["next"]), (True, "close-round"))
-        self.assertEqual(self.factory("close-round", job_id)["next"], "approver")
+        self.assertEqual(self.factory("close-round", job_id)["next"], "stride-review")
 
     def test_security_and_code_cannot_be_not_applicable_and_changes_need_findings(self):
         job_id = self.job_in_review()
@@ -194,6 +213,37 @@ class FactoryBoardTests(unittest.TestCase):
         self.assertIn("VERDICT: PASS or VERDICT: CHANGES", problems)
         self.assertIn("needs at least one finding", problems)
 
+    def test_security_changes_needs_a_critical_or_high_severity_line(self):
+        job_id = self.job_in_review()
+        self.job_file(
+            job_id, "round-1/review-security.md",
+            "VERDICT: CHANGES\n\nSEVERITY: MEDIUM\nStale dependency, no known exploit path.\n",
+        )
+        self.write_reviews(job_id, 1, {"ux": "N/A", "ui": "N/A", "code": "PASS"})
+
+        status = self.factory("round-status", job_id)
+        self.assertEqual(status["reviews"]["security"], "invalid")
+        self.assertIn("SEVERITY: CRITICAL", " ".join(status["invalid"].values()))
+
+        # A HIGH finding is enough to legitimately block the round.
+        self.job_file(
+            job_id, "round-1/review-security.md",
+            "VERDICT: CHANGES\n\nSEVERITY: HIGH\nMissing authorization check on DELETE /items/:id.\n",
+        )
+        status = self.factory("round-status", job_id)
+        self.assertEqual(status["reviews"]["security"], "CHANGES")
+
+    def test_security_pass_may_carry_lower_severity_notes(self):
+        job_id = self.job_in_review()
+        self.write_reviews(job_id, 1, {"ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.job_file(
+            job_id, "round-1/review-security.md",
+            "VERDICT: PASS\n\nSEVERITY: LOW\nConsider rotating the sample API key in fixtures.\n",
+        )
+        status = self.factory("round-status", job_id)
+        self.assertEqual(status["reviews"]["security"], "PASS")
+        self.assertEqual(self.factory("close-round", job_id)["next"], "stride-review")
+
     def test_review_changes_trigger_one_rebuild_then_escalate(self):
         job_id = self.job_in_review()
         self.write_reviews(job_id, 1, {"security": "CHANGES", "ux": "N/A", "ui": "N/A", "code": "PASS"})
@@ -205,8 +255,76 @@ class FactoryBoardTests(unittest.TestCase):
         self.pass_test_audit(job_id, 2)
         self.write_reviews(job_id, 2, {"security": "CHANGES", "ux": "N/A", "ui": "N/A", "code": "PASS"})
         result = self.factory("close-round", job_id)
-        self.assertEqual(result["next"], "approver")
+        self.assertEqual(result["next"], "stride-review")
         self.assertEqual([entry["round"] for entry in result["job"]["history"]], [1, 2])
+        self.assertEqual(self.pass_stride_review(job_id, 2)["next"], "approver")
+
+    def test_stride_review_runs_once_per_job_after_the_four_reviewers_pass(self):
+        job_id = self.job_in_review()
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        result = self.factory("close-round", job_id)
+        self.assertEqual(result["next"], "stride-review")
+        self.assertEqual(result["job"]["stage"], "stride-review")
+        self.assertEqual(result["job"]["stride"], "pending")
+
+        # stride-review-done is only valid once the job has actually reached that stage.
+        self.assertIn("stride-review", self.factory("decision", job_id, expect_error=True))
+
+        error = self.factory("stride-review-done", job_id, expect_error=True)
+        self.assertIn("review-stride.md", error)
+
+        self.job_file(job_id, "round-1/review-stride.md", "not a verdict at all\n")
+        error = self.factory("stride-review-done", job_id, expect_error=True)
+        self.assertIn("VERDICT: PASS or VERDICT: CHANGES", error)
+
+        result = self.pass_stride_review(job_id, 1)
+        self.assertEqual(result["next"], "approver")
+        self.assertEqual(result["job"]["stage"], "approver")
+        self.assertEqual(result["job"]["stride"], "PASS")
+
+    def test_stride_review_changes_needs_critical_or_high_and_consumes_a_review_round(self):
+        job_id = self.job_in_review()
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.factory("close-round", job_id)
+
+        # A MEDIUM-only STRIDE finding must not block, same severity floor as security.
+        self.job_file(
+            job_id, "round-1/review-stride.md",
+            "VERDICT: CHANGES\n\nSEVERITY: MEDIUM\nOpen finding I-004, pre-existing, not newly introduced.\n",
+        )
+        error = self.factory("stride-review-done", job_id, expect_error=True)
+        self.assertIn("SEVERITY: CRITICAL", error)
+
+        # A newly-introduced CRITICAL finding legitimately sends the job back to build,
+        # consuming a round from the same budget the four reviewers share.
+        self.job_file(
+            job_id, "round-1/review-stride.md",
+            "VERDICT: CHANGES\n\nSEVERITY: CRITICAL\nE-002: new endpoint reuses the unauthenticated "
+            "legacy router at api/legacy.py:40.\n",
+        )
+        result = self.factory("stride-review-done", job_id)
+        self.assertEqual(result["next"], "rebuild")
+        self.assertEqual((result["job"]["round"], result["job"]["stage"]), (2, "build"))
+        # close-round already spent one round getting the four reviewers to all-PASS;
+        # this STRIDE rebuild spends the attempt's second and last review round.
+        self.assertEqual(result["job"]["attempt"]["review_rounds"], 2)
+
+        # The budget is now exhausted, so the rebuilt round's reviewers no longer get
+        # a further rebuild even if one of them still finds a CRITICAL/HIGH issue: the
+        # job goes straight to the approver with the finding carried as a warning.
+        self.factory("build-done", job_id)
+        self.pass_test_audit(job_id, 2)
+        self.write_reviews(job_id, 2, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.assertEqual(self.factory("close-round", job_id)["next"], "stride-review")
+
+        self.job_file(
+            job_id, "round-2/review-stride.md",
+            "VERDICT: CHANGES\n\nSEVERITY: CRITICAL\nE-002 still present after the fix.\n",
+        )
+        result = self.factory("stride-review-done", job_id)
+        self.assertEqual(result["next"], "approver")
+        self.assertEqual(result["job"]["stage"], "approver")
+        self.assertTrue(any("STRIDE" in warning for warning in result["job"]["warnings"]))
 
     def test_reviewers_wait_for_a_passing_test_audit(self):
         job_id = self.factory("new", "Add rate limiting")["id"]
@@ -236,9 +354,10 @@ class FactoryBoardTests(unittest.TestCase):
         self.assertEqual(result["job"]["reviews"]["code"], "pending")
         self.write_reviews(job_id, 2, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
         status = self.factory("close-round", job_id)
-        self.assertEqual(status["next"], "approver")
+        self.assertEqual(status["next"], "stride-review")
         self.assertTrue(any("test audit" in warning for warning in status["job"]["warnings"]))
         self.assertEqual([entry["test_audit"] for entry in status["job"]["history"]], ["CHANGES", "CHANGES"])
+        self.assertEqual(self.pass_stride_review(job_id, 2)["next"], "approver")
 
     def test_test_audit_rebuilds_do_not_use_up_review_rounds(self):
         job_id = self.job_in_review_after_failed_test_audit()
@@ -250,7 +369,7 @@ class FactoryBoardTests(unittest.TestCase):
     def test_decision_must_escalate_and_rework_reopens_the_build(self):
         job_id = self.job_in_review()
         self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
-        self.factory("close-round", job_id)
+        self.close_round_to_approver(job_id, 1)
 
         self.job_file(job_id, "decision.md", "APPROVE\n\nShip it.\n")
         error = self.factory("decision", job_id, expect_error=True)
@@ -311,7 +430,7 @@ class FactoryBoardTests(unittest.TestCase):
     def test_rework_refuses_while_another_job_is_building(self):
         first = self.job_in_review()
         self.write_reviews(first, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
-        self.factory("close-round", first)
+        self.close_round_to_approver(first, 1)
         self.job_file(first, "decision.md", "ESCALATE\n")
         self.factory("decision", first)
         self.git("commit", "--quiet", "-am", "human commits job one")
@@ -349,7 +468,7 @@ class FactoryBoardTests(unittest.TestCase):
         self.assertEqual(result["spawn"], ["security", "ux", "code"])
         self.assertEqual((result["job"]["reviews"]["ux"], result["job"]["reviews"]["ui"]), ("pending", "N/A"))
         self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "code": "PASS"})
-        self.assertEqual(self.factory("close-round", job_id)["next"], "approver")
+        self.close_round_to_approver(job_id, 1)
 
         self.job_file(job_id, "decision.md", "ESCALATE\n")
         self.factory("decision", job_id)
@@ -422,10 +541,47 @@ class FactoryBoardTests(unittest.TestCase):
         self.assertIn("already abandoned", self.factory("abandon", stuck, "again", expect_error=True))
         self.assertIn("nothing", self.factory("resume", stuck)["next"])
 
+    def test_archive_closes_an_approved_job_and_only_from_needs_human(self):
+        job_id = self.job_in_review()
+        self.assertIn("needs-human", self.factory("archive", job_id, expect_error=True))
+
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.close_round_to_approver(job_id, 1)
+        self.job_file(job_id, "decision.md", "ESCALATE\n\nReady for approval.\n")
+        self.factory("decision", job_id)
+
+        job = self.factory("archive", job_id)
+        self.assertEqual(job["stage"], "abandoned")
+        self.assertEqual(job["warnings"], ["archived: approved"])
+        self.assertEqual(job["history"][-1]["archived_from"], "needs-human")
+        self.assertIn("nothing", self.factory("resume", job_id)["next"])
+        self.assertIn("already abandoned", self.factory("archive", job_id, "again", expect_error=True))
+
     def test_record_model_rejects_unknown_stages(self):
         job_id = self.factory("new", "Add rate limiting")["id"]
         self.assertIn("unknown stage", self.factory("record-model", job_id, "reviewer", "x", expect_error=True))
         self.assertEqual(self.factory("record-model", job_id, "code", "sonnet")["models"], {"code": "sonnet"})
+        self.assertEqual(self.factory("record-model", job_id, "stride", "opus")["models"], {"code": "sonnet", "stride": "opus"})
+
+    def test_resume_explains_the_stride_review_step(self):
+        job_id = self.job_in_review()
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.factory("close-round", job_id)
+        action = self.factory("resume", job_id)["next"]
+        self.assertIn("stride", action)
+        self.assertIn("stride-review-done", action)
+
+    def test_models_configure_the_stride_stage_as_expensive_tier(self):
+        config = self.factory("models", "big-model", "small-model", "--cli", "kilo")
+        self.assertEqual(config["stages"]["stride"], "big-model")
+
+    def test_claude_install_writes_a_stride_reviewer_subagent(self):
+        claude_home = Path(self.temp_directory.name) / "claude-home"
+        self.factory("models", "opus-sonnet", "--cli", "claude")
+        self.factory("install-claude", "--claude-home", str(claude_home))
+        stride_agent = (claude_home / "agents" / "eg-review-stride.md").read_text(encoding="utf-8")
+        self.assertIn("model: opus", stride_agent)
+        self.assertNotIn("Edit", stride_agent)
 
 if __name__ == "__main__":
     unittest.main()

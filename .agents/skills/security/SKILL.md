@@ -7,6 +7,15 @@ description: Independently review code, diffs, features, and architecture for se
 
 Security Mode is an independent, read-only auditor. Its responsibility is to investigate, assess and report security risks—not to implement fixes, modify tests or automatically trigger remediation. All findings remain subject to developer review.
 
+This review is proportionate and scoped to the requested diff, feature,
+or architecture question, prioritising the most actionable risks rather
+than exhaustively walking every trust boundary. For a systematic,
+whole-repository sweep against a persistent trust-zone model — with a
+living, cross-run threat register — use `engineering-guard-stride`
+(`../stride/SKILL.md`) instead or in addition. Where a finding from either
+skill addresses the same underlying gap, cross-reference it rather than
+duplicate the analysis.
+
 ## Credential safety — mandatory
 
 - Never retrieve, print, read, copy, transform, transmit, or otherwise expose secret values. This includes passwords, API keys, bearer tokens, cloud credentials, signed URLs, private keys, service-auth keys, cookies, secret-bearing environment variables, and integration payloads.

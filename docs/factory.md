@@ -10,17 +10,20 @@ Design and approval history: `decisions/engineering-guard-factory.md`.
 ## The loop
 
 ```
-feature ─► spec-writer ─► [human: approve-spec] ─► builder ◄──────────────┐
-                                                      │                    │
-                                                test-auditor ── CHANGES ───┤
-                                                      │ PASS               │
-                       ┌──────────────┬───────────────┼──────────────┐     │
-                       ▼              ▼               ▼              ▼     │
-                   security          ux              ui            code    │
-                       └──────────────┴── WAIT FOR ALL ┴─────────────┘     │
-                                              │ any CHANGES (≤ 2 review rounds) ┘
-                                              ▼ all PASS / N/A, or limit hit
-                                           approver ─► ESCALATE ─► needs-human
+feature ─► spec-writer ─► [human: approve-spec] ─► builder ◄──────────────────┐
+                                                      │                        │
+                                                test-auditor ── CHANGES ───────┤
+                                                      │ PASS                   │
+                       ┌──────────────┬───────────────┼──────────────┐         │
+                       ▼              ▼               ▼              ▼         │
+                   security          ux              ui            code       │
+                       └──────────────┴── WAIT FOR ALL ┴─────────────┘         │
+                                               │ all PASS/N/A (≤ 2 review rounds) ┘
+                                               ▼
+                                            stride (whole-repo, once per job) ──CHANGES──┘
+                                               │ PASS (no new CRITICAL/HIGH)
+                                               ▼
+                                            approver ─► ESCALATE ─► needs-human
 ```
 
 | Stage | Reuses | Default tier | Writes |
@@ -32,14 +35,18 @@ feature ─► spec-writer ─► [human: approve-spec] ─► builder ◄──
 | ux | UX checklist (`N/A` if no user-facing change) | cheap | `round-N/review-ux.md` |
 | ui | UI design checklist (`N/A` if no visual change) | cheap | `round-N/review-ui.md` |
 | code | verify | cheap | `round-N/review-code.md` |
+| stride | stride (whole-repo threat model) | expensive | `round-N/review-stride.md`, plus its own git-excluded profile/report |
 | approver | verify (final pass) | expensive | `decision.md` |
 
 Rules enforced by the board script:
 
 - Agents read context from job files and write only their own file.
-- The test audit, security and code reviews start with `VERDICT: PASS` or
-  `VERDICT: CHANGES`; UX and UI reviews may also use `VERDICT: N/A`. A
-  `CHANGES` verdict must be followed by at least one finding.
+- The test audit, security, code and STRIDE reviews start with `VERDICT: PASS`
+  or `VERDICT: CHANGES`; UX and UI reviews may also use `VERDICT: N/A`. A
+  `CHANGES` verdict must be followed by at least one finding. A security or
+  STRIDE `CHANGES` must additionally cite a finding with `SEVERITY: CRITICAL`
+  or `SEVERITY: HIGH`; MEDIUM/LOW/hardening-only findings are reported under
+  `PASS` instead and do not block a round.
 - `build-done` freezes the change into `round-N/change.patch` and
   `round-N/files.txt` (untracked files included); every auditor and reviewer
   reads that snapshot.
@@ -56,6 +63,11 @@ Rules enforced by the board script:
 - Any review `CHANGES` sends the job back to a fresh builder; each attempt
   (initial build or rework) gets two review rounds. After that the approver
   runs with the open findings listed.
+- After the four reviewers all pass (or N/A), **stride** runs once against
+  the job's full diff and the repository's whole trust-zone model — not once
+  per round. Its `CHANGES` (a new or newly-confirmed CRITICAL/HIGH threat on
+  a changed component) sends the job back to the builder and consumes the
+  same two-round budget as the other reviewers.
 - `decision.md` must start with `ESCALATE`: the human always decides.
 - `approve-spec` rewrites the spec's `Status` line to `Approved`, because
   builders read the spec file, not the board.
@@ -117,9 +129,10 @@ session model and the board records `default (fallback)`.
 | `<feature>` | Create a job, write `prompt.md` and `spec.md`, then stop at **spec-review**. |
 | `next` | Same, using the first unchecked `- [ ]` item in `.factory/backlog.md` (and checks it). |
 | `approve-spec <id>` | Human approval of the spec. Runs build → reviews → approver until **needs-human**. |
-| `approve <id>` | Read-only. Suggests a branch name, commit message and PR description that follow the repo's conventions. You commit and push. |
+| `approve <id>` | Suggests a branch name, commit message and PR description that follow the repo's conventions, then archives the job. You commit and push. |
 | `rework <id> <note>` | Send a **needs-human** job back to the builder with your note; the budget resets (two review rounds, one test-audit rebuild). |
 | `resume <id>` | Continue an interrupted job from its current stage. |
+| `archive <id> [reason]` | Close an approved **needs-human** job and move it to Archive. |
 | `abandon <id> <reason>` | Close a job for good, for example after a crash; it stops blocking new builds. Code changes stay in the worktree. |
 
 The orchestrator's first step is always to create the job and show you its
@@ -145,6 +158,8 @@ feedback; it is saved as `spec-feedback-N.md`, the spec-writer revises
    `decision.md`, the reviews, and `git diff`.
 5. Either `rework <id> "<what to change>"`, or `approve <id>` and use the
    suggested branch, commit message and PR description to commit yourself.
+   Approving also archives the job, including the same action from the
+   dashboard's **Archive job** button.
 
 Commit (or stash) the job's changes before approving the next spec: the next
 build refuses to start on a dirty worktree.
@@ -163,21 +178,37 @@ repository's `.gitignore` is not modified.
   dashboard.html     # copied from the skill on every run
   jobs/001-<slug>/
     feature.md  prompt.md  spec.md  spec-feedback-N.md  build.md  decision.md  rework-N.md
-    round-1/change.patch  files.txt  test-audit.md  review-security.md  review-ux.md  review-ui.md  review-code.md
+    round-1/change.patch  files.txt  test-audit.md  review-security.md  review-ux.md  review-ui.md  review-code.md  review-stride.md
 ```
 
+The STRIDE reviewer also maintains its own profile and living threat
+register at a separate, git-excluded location in the target repository
+(see `.agents/skills/stride/SKILL.md`) — that state persists across jobs
+and is not part of any single job's folder.
+
 ## Dashboard
+
+### Central Dashboard (Recommended)
+
+The central factory server aggregates all jobs across your active repositories into one unified view. Start it once with:
+
+```
+/factory-server start
+```
+
+Then visit **http://localhost:5173/** to see all in-progress and archived jobs grouped by repository. Each factory automatically pushes updates when state changes—no per-repository setup needed. A job that reaches **needs-human** can be archived straight from its modal with **Archive job**; the reason is recorded and the repository's board is updated.
+
+This is the recommended way to monitor multiple repositories without managing separate dashboard instances.
+
+### Per-Repository Dashboard (Optional)
+
+For a single repository's dashboard, run:
 
 ```sh
 python3 -m http.server 8000 --bind 127.0.0.1 -d .factory
 ```
 
-Open <http://localhost:8000/dashboard.html>. Jobs are cards across the stage
-columns; each round shows a `tests` chip followed by reviewer chips (green PASS, amber
-CHANGES, grey N/A or pending). Jobs waiting on you (spec-review, needs-human)
-are outlined in purple. Click a card to read its markdown files. The page
-polls `board.json` every two seconds. Keep it bound to `127.0.0.1`: specs and
-security reviews can describe unfixed vulnerabilities.
+Open <http://localhost:8000/dashboard.html>. Jobs are cards across the stage columns (Pipeline view) or grouped by repository (Grouped view); each round shows a `tests` chip followed by reviewer chips (green PASS, amber CHANGES, grey N/A or pending). Jobs waiting on you (spec-review, needs-human) are outlined in teal. Click a card to read its markdown files, fetched on demand from `jobs/<job-id>/<file>`. The dashboard tries the central server's `/api/jobs` endpoint first; when that's unavailable (as under this plain static server, which has no backend) it falls back to polling `board.json` directly every two seconds. Static mode is read-only, so use the central dashboard to archive a job from the modal. Keep it bound to `127.0.0.1`: specs, security reviews and STRIDE's living threat register can describe unfixed vulnerabilities. STRIDE's profile and report live outside `.factory/`, at a separate git-excluded location, so they are not shown by this dashboard.
 
 ## Board script reference
 
@@ -197,10 +228,12 @@ says why. You normally never call it yourself except for the Claude setup.
 | `build-done <id>` | `build` → `test-audit` (needs `build.md` and a change since the base; writes the round snapshot), or → `needs-human` if `build.md` starts with `BLOCKED`. |
 | `test-audit-done <id>` | Reads `round-N/test-audit.md` → `review` (returns the reviewers to `spawn`), or `build` on `CHANGES`. |
 | `round-status <id>` | Never changes the stage: saves and prints reviewer verdicts, `invalid` files and whether the round is complete. |
-| `close-round <id>` | Closes a complete round → `build` or `approver`. |
+| `close-round <id>` | Closes a complete round → `build` or `stride-review`. |
+| `stride-review-done <id>` | Reads `round-N/review-stride.md` → `approver`, or `build` on `CHANGES` (consumes a review round, same budget as the four reviewers). |
 | `decision <id>` | `approver` → `needs-human` (needs `ESCALATE`). |
 | `rework <id> "<note>"` | `needs-human` → `build`; also marks `spec.md` approved. |
 | `abandon <id> "<reason>"` | Any stage → `abandoned`. |
+| `archive <id> [reason]` | `needs-human` → `abandoned` (Archive); records `archived_from`. |
 | `resume <id>` | Prints the next step for the job's current stage. |
 | `record-model <id> <stage> <model>` | Note the model a stage actually ran on (stage must be known). |
 | `show [<id>]` | Print the board or one job. |

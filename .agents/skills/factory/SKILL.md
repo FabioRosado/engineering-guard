@@ -1,6 +1,6 @@
 ---
 name: engineering-guard-factory
-description: Run a feature through the Engineering Guard software factory - spec, human spec approval, build, test audit, parallel security/UX/UI/code reviews, and an approver that always escalates to a human. Use for "/engineering-guard-factory <feature>", "next", "models", "approve-spec", "approve", "rework", "resume" or "abandon".
+description: Run a feature through the Engineering Guard software factory - spec, human spec approval, build, test audit, parallel security/UX/UI/code reviews, a whole-repo STRIDE threat-model gate, and an approver that always escalates to a human. Use for "/engineering-guard-factory <feature>", "next", "models", "approve-spec", "approve", "rework", "resume", "archive" or "abandon".
 ---
 
 # Engineering Guard — Factory
@@ -36,16 +36,19 @@ tests, or edit any file outside `.factory/` and you have no job id from
 ## The loop
 
 ```
-feature ─► spec-writer ─► [HUMAN approve-spec] ─► builder ◄──────────────┐
-                                                     │                   │
-                                               test-auditor ── CHANGES ──┤
-                                                     │ PASS              │
-                       ┌─────────────┬───────────────┼─────────────┐     │
-                       ▼             ▼               ▼             ▼     │
-                   security         ux              ui           code    │
-                       └─────────────┴──── WAIT FOR ALL ───────────┘     │
-                                             │ any CHANGES (≤2 review rounds) ┘
-                                             ▼ all PASS/N/A or limit hit
+feature ─► spec-writer ─► [HUMAN approve-spec] ─► builder ◄──────────────────┐
+                                                     │                        │
+                                               test-auditor ── CHANGES ───────┤
+                                                     │ PASS                   │
+                       ┌─────────────┬───────────────┼─────────────┐          │
+                       ▼             ▼               ▼             ▼          │
+                   security         ux              ui           code        │
+                       └─────────────┴──── WAIT FOR ALL ───────────┘          │
+                                             │ all PASS/N/A (≤2 review rounds) ┘
+                                             ▼
+                                          stride (whole-repo, once per job) ──CHANGES──┘
+                                             │ PASS (no new CRITICAL/HIGH)
+                                             ▼
                                           approver ─► ESCALATE ─► needs-human
 ```
 
@@ -58,7 +61,16 @@ feature ─► spec-writer ─► [HUMAN approve-spec] ─► builder ◄──�
 | ux | `roles/review-ux.md` | cheap | `round-N/review-ux.md` |
 | ui | `roles/review-ui.md` | cheap | `round-N/review-ui.md` |
 | code | `roles/review-code.md` | cheap | `round-N/review-code.md` |
+| stride | `roles/review-stride.md` | expensive | `round-N/review-stride.md` (plus its own git-excluded profile/report) |
 | approver | `roles/approver.md` | expensive | `decision.md` |
+
+`stride` runs once per job after the four reviewers all reach PASS/N/A,
+against the job's full diff since `base` — not once per round like the
+other reviewers — because it evaluates the whole repository's trust-zone
+model (`../stride/SKILL.md`), not just the latest round's change. Its
+`CHANGES` verdict (a new or newly-confirmed CRITICAL/HIGH threat on a
+changed component) sends the job back to the builder and consumes the
+same 2-round review budget as security/ux/ui/code.
 
 ## Rules
 
@@ -67,14 +79,20 @@ feature ─► spec-writer ─► [HUMAN approve-spec] ─► builder ◄──�
   number/folder, and the job `base` commit. Each agent writes only its own file.
   Auditors and reviewers read the change from `round-N/change.patch` and
   `round-N/files.txt`, which `build-done` writes, so all of them see the same change.
-- The test audit, security and code reviews start with `VERDICT: PASS|CHANGES`;
-  UX and UI reviews may also use `VERDICT: N/A`; a `CHANGES` verdict must be
-  followed by findings; `decision.md` starts with `ESCALATE`. The board script
-  rejects anything else.
+- The test audit, security, code and STRIDE reviews start with
+  `VERDICT: PASS|CHANGES`; UX and UI reviews may also use `VERDICT: N/A`; a
+  `CHANGES` verdict must be followed by findings; a security or STRIDE
+  `CHANGES` must additionally cite a finding with `SEVERITY: CRITICAL` or
+  `SEVERITY: HIGH` (MEDIUM/LOW/hardening-only findings belong under `PASS`);
+  `decision.md` starts with `ESCALATE`. The board script rejects anything else.
 - WAIT FOR ALL: spawn the reviewers listed in `spawn` in parallel, then run
   `FACTORY round-status <id>` (never changes the stage) until `complete: true`, then
   `FACTORY close-round <id>`. Never start the builder mid-round. If
   `round-status` lists `invalid` files, re-spawn only those reviewers.
+- `close-round` moves the job to stage `stride-review`, not straight to the
+  approver: spawn **stride** once (not per round) with `base` and the current
+  round folder, then `FACTORY stride-review-done <id>` and follow `next`
+  (`rebuild` or `approver`), the same pattern as the test audit.
 - If a stage agent returns without writing its file, re-spawn it once. If it
   fails again, stop and report the stage to the human (`resume <id>` later
   continues from there, `abandon <id>` closes the job).
@@ -145,12 +163,16 @@ job is building. Then run the build loop:
 3. Spawn the reviewers from `spawn` in parallel with `base` and `round-N/`.
 4. `FACTORY round-status <id>` until `complete`, then `FACTORY close-round <id>` and follow `next`:
    - `rebuild` → back to step 1 (round increased).
+   - `stride-review` → continue with step 5.
+5. Spawn **stride** once (not per round) with `base` and the current
+   `round-N/`, then `FACTORY stride-review-done <id>` and follow `next`:
+   - `rebuild` → back to step 1 (round increased).
    - `approver` → spawn **approver**, then `FACTORY decision <id>`.
-5. Report: job id, rounds, test-audit and review verdicts, any `warnings`, and the path to
-   `decision.md`. The job is now `needs-human`.
+6. Report: job id, rounds, test-audit, review and STRIDE verdicts, any
+   `warnings`, and the path to `decision.md`. The job is now `needs-human`.
 
 ### `approve <job-id>`
-Read-only (decision D8). Requires stage `needs-human` (`FACTORY show <id>`).
+Read-only on the code (decision D8). Requires stage `needs-human` (`FACTORY show <id>`).
 Read `spec.md`, `build.md`, `decision.md`, `git diff <base>` and
 `git log --oneline -15`, then output for the human:
 
@@ -159,6 +181,10 @@ Read `spec.md`, `build.md`, `decision.md`, `git diff <base>` and
 - **Commit message** matching the repo's commit style.
 - **PR description:** summary, acceptance criteria with evidence, checks run,
   review outcome, risks.
+
+Then close the job so it leaves the human queue: `FACTORY archive <id>
+"approved: branch name, commit message and PR description generated"`. This
+moves it to the Archive tab and records the reason; it does not touch code.
 
 Do not run `git commit`, `git push`, `git checkout` or `gh`.
 
@@ -177,7 +203,19 @@ Only on the human's instruction. `FACTORY abandon <id> "<reason>"` closes the
 job so it no longer blocks other builds. Code changes stay in the worktree;
 the human decides whether to keep or discard them.
 
+### `archive <job-id> [reason]`
+`FACTORY archive <id> "<reason>"` closes an approved `needs-human` job and moves
+it to the Archive tab. Used by `approve`; the human can also trigger it from the
+dashboard's Archive job button. Code changes stay in the worktree.
+
 ## Dashboard
 
-`python3 -m http.server 8000 --bind 127.0.0.1 -d .factory` then open
-<http://localhost:8000/dashboard.html>. It polls `board.json`.
+Central server (all repositories, recommended): run
+`central_factory_server.py`, then open <http://localhost:5173/>. Each factory
+pushes updates automatically; no per-repository setup needed.
+
+Per-repository (single repo only): `python3 -m http.server 8000 --bind
+127.0.0.1 -d .factory` then open <http://localhost:8000/dashboard.html>. The
+dashboard tries the central server's `/api/jobs` first and falls back to
+polling `board.json` directly when no backend is present, as under this plain
+static server.
