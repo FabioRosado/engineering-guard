@@ -37,7 +37,7 @@ Add a system-wide factory dashboard that aggregates job state from all active re
 | D15 | Push is non-blocking: 2-second timeout; network failures logged but do not block factory progress. |
 | D16 | Archive stores completed jobs for 30 days; retention is configurable. |
 | D17 | Port 5173 (Vite default, unlikely conflicts); bind to 127.0.0.1 (local-only). |
-| D18 | Central server storage: simple JSON files (`data.json` for in-progress, `archive.json` for completed); no external database required. |
+| D18 | Central server storage: simple JSON files (`data.json` for in-progress, `archive.json` for completed); no external database required. **Superseded for new data only by D52 in `factory-workspace.md` (2026-10-30):** tasks, notes and job events are stored in SQLite (`factory.db`); jobs and the archive stay JSON as decided here. |
 
 ## Architecture
 
@@ -48,6 +48,7 @@ Add a system-wide factory dashboard that aggregates job state from all active re
 - REST endpoints:
   - `POST /api/jobs/sync` — receives job updates from factories
   - `POST /api/jobs/archive` — archives a needs-human job when the dashboard's Archive job button is used
+  - `POST /api/jobs/abandon` — abandons a job in any open stage when the dashboard's Abandon button is used; a reason is required
   - `GET /api/jobs` — returns all in-progress jobs (JSON)
   - `GET /api/jobs/archive` — returns archived jobs
   - `GET /health` — readiness check
@@ -78,9 +79,13 @@ Add a system-wide factory dashboard that aggregates job state from all active re
   - Stage column + round badges
   - Reviewer chips (PASS/CHANGES/N/A/pending)
   - Warnings (e.g., test audit failed but approved)
-- Clicking card opens modal with tabs for each markdown file
+- Clicking card opens a modal. A top bar switches between Overview, Stats, Notes, Documents (root files) and one scope per round; a sidebar lists only the files of the current Documents or Round scope, so Overview, Stats and Notes use the full width
 - The modal's Archive job button closes an approved needs-human job without
   leaving the dashboard (no copied shell command)
+- The modal's Abandon button stops a job at any open stage (build, review, ...) and moves it
+  to the Archive tab. It lives in the modal, not on the card: a card is one button, and a
+  destructive action should not sit one mis-click away on a dense board. A reason is required
+  and recorded in the job history; worktree changes are left alone. Archived jobs have no Abandon.
 - Stage columns: spec → spec-review → build → test-audit → review → stride-review → approver → needs-human → abandoned
 - Markdown rendering: inline renderer (same as per-repo dashboard)
 - Repository grouping (decided D14, first option):

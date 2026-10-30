@@ -96,6 +96,9 @@ Rules enforced by the board script:
   Loosened checks (suppression comments, linter or gate config edits, skipped, deleted or
   weakened tests) are **tamper**: never sent back to the builder, listed for you, and cleared only
   by `accept-suppression`. A missing optional tool (gitleaks, bandit) warns and never fails the gate.
+  bandit reports only issues on lines the change added, so existing issues in a touched file do not
+  fail the job; a file bandit cannot parse fails, because it was not scanned. A failed check's
+  command output appears in `round-N/quality-gate.md`.
 - `decision.md` must start with `ESCALATE`: the human always decides.
 - `approve-spec` rewrites the spec's `Status` line to `Approved`, because
   builders read the spec file, not the board.
@@ -104,6 +107,61 @@ Rules enforced by the board script:
   needs-human instead of spending review rounds on an empty change.
 - The build only starts on a clean worktree (ignoring `.factory/`), and only
   one job can be building at a time.
+
+## Declaring the repository's own checks
+
+The gate runs a repository's lint, format, type and test commands only if they are declared in
+`.quality-gate.json` at the repository root. Otherwise each reports `not_configured`, which is
+neutral: a repository with none declared gets only the built-in rules and the scanners.
+
+To avoid writing it by hand, run once from the target repository:
+
+```sh
+python3 /path/to/engineering-guard/.agents/skills/factory/scripts/quality_gate.py --init
+```
+
+It reads the repository's files (it never runs a command) and writes a proposed config plus a note
+per check saying where each command came from or why it was left out. Review it, then **commit it
+before starting a job**: an uncommitted or edited config is reported as tamper and needs
+`accept-suppression`. `--init` never overwrites an existing file.
+
+Detection prefers the repository's own entry point, because it carries the repository's environment
+wrapper (a conda or venv `run`): a Makefile target, then an npm script, then a tool configured in
+project files (ruff, mypy, pytest, cargo, go). Only these names are recognised, so `system-test`,
+`deploy-*` and other targets that need credentials are never proposed:
+
+| Check | Recognised names |
+|-------|------------------|
+| lint | `lint`, `check-lint`, `lint-check` |
+| format | `format-check`, `format:check`, `check-format`, `fmt-check`, `format_check` |
+| types | `typecheck`, `type-check`, `types`, `check-types`, `mypy`, `tsc` |
+| test | `test`, `tests`, `unit`, `test-unit`, `check-test` |
+
+Format is proposed only in check mode. A gate that ran a formatter would rewrite code the reviewers
+never saw and hide the failure it exists to report; if a repository has only a mutating `format`
+target, `--init` says so and proposes nothing for format.
+
+The schema, if you edit it yourself. Each command is an argv list (no shell):
+
+```json
+{
+  "checks": {
+    "lint":   ["ruff", "check", "{changed}"],
+    "format": ["ruff", "format", "--check", "{changed}"],
+    "types":  ["make", "typecheck"],
+    "test":   ["make", "test"]
+  },
+  "suffixes": { "lint": [".py"], "format": [".py"] }
+}
+```
+
+- `{changed}` expands to the changed files that still exist, so existing debt in files the change never
+  touched cannot fail the job. Use it only with a tool called directly: `make` and `npm run` cannot pass
+  a file list through, so those run repo-wide.
+- `suffixes` keeps files the tool cannot read out of its arguments. With no matching changed file the
+  check reports `not_configured`.
+- Type and test commands normally stay repo-wide, because a change can break them anywhere.
+- Each command has a 300 second timeout. A declared command that is not found fails the check.
 
 ## Setup
 
@@ -224,9 +282,19 @@ npm run dashboard
 
 `npm run dashboard` builds the Svelte UI in `ui/` when it is missing or older than its sources (the first run installs its packages, which needs Node.js 20.19+ or 22.12+), then runs the central server in the foreground at <http://localhost:5173/>; stop it with Ctrl-C. There is no per-repository mode: every factory pushes its state to the central server, which is the only source for the dashboard.
 
-Jobs are cards across the stage columns (Pipeline view, which scrolls sideways so every stage stays in order) or grouped by repository (Grouped view); each round shows a `tests` chip followed by reviewer chips (green PASS, amber CHANGES, grey N/A or pending). Jobs waiting on you (spec-review, needs-human) are outlined in teal. Click a card to open the job. A job with a `handover.md` opens on an **Overview** tab: status chips, warnings, the recommendation from `decision.md`, and the handover rendered as a document with its mermaid diagrams drawn. A diagram that cannot be drawn shows a plain error card with its source instead of leaving a gap; the other tabs show each job file. Jobs from before `handover.md` existed have no Overview and open on their first file. Use **Archive job** in the viewer to close an approved job.
+Jobs are cards across the stage columns (Pipeline view, which scrolls sideways so every stage stays in order) or grouped by repository (Grouped view); each round shows a `tests` chip followed by reviewer chips (green PASS, amber CHANGES, grey N/A or pending). Jobs waiting on you (spec-review, needs-human) are outlined in teal. Click a card to open the job. A job with a `handover.md` opens on an **Overview** tab: status chips, warnings, the recommendation from `decision.md`, and the handover rendered as a document with its mermaid diagrams drawn. A diagram that cannot be drawn shows a plain error card with its source instead of leaving a gap; a top bar switches between Overview, Stats, Notes, Documents (`spec.md`, `build.md`, ...) and one scope per round (`Round 1`, `Round 2`, ...); the sidebar lists only the files of the selected Documents or Round scope. Jobs from before `handover.md` existed have no Overview and open on their first file. Use **Archive job** in the viewer to close an approved job. Use **Abandon** (shown for every job that is still open, at any stage) to stop a job that is stuck or no longer wanted: it asks for a reason, records it in the job history, moves the job to the Archive tab, and leaves worktree changes untouched.
 
 Job markdown is written by agents, so the UI treats it as untrusted: HTML in it is shown as text, scripts and `javascript:` links are removed, and diagrams are drawn in mermaid's strict mode. Keep the server bound to `127.0.0.1`: specs, security reviews and STRIDE's living threat register can describe unfixed vulnerabilities. STRIDE's profile and report live outside `.factory/`, at a separate git-excluded location, so they are not shown by this dashboard.
+
+### Tasks, notes and job statistics
+
+The **Tasks** tab is a board for work you have not started: Backlog, Ready, In Progress and Done. A strip above it shows the jobs running now. Add a task by title, open it to write its **prompt**, and press **Copy prompt** when you are ready to start a session; paste it into your agent to run the factory. The dashboard never starts a session itself. A task can be linked to a job by hand, and moves between columns by dragging or from the task's **Column** menu. Both tasks and notes are plain text, so anything in them is shown as text, never as markup.
+
+Notes attach to a task or to a job (the job viewer's **Notes** tab). The job viewer's **Stats** tab shows total time, time waiting on you versus the factory working, build rounds, rebuilds and an agent count, plus the time spent in each stage.
+
+The stats come from a timestamped event the board records each time a job changes stage and sends with its normal push. They measure when each stage began and ended, not how long an agent computed. Agents run is derived from the stages a job passed through, and counts all five reviewers each round even when one was marked N/A. Jobs that finished before events were recorded have no timing and say so. Tokens, cost and exit codes are not recorded.
+
+Storage: jobs stay in `data.json` and `archive.json` in `~/.engineering-guard-factory/`, which remain a mirror of each repository's `board.json`. Tasks, notes and events are kept in `factory.db` (SQLite) in the same folder, readable only by you. The dashboard owns that file: a repository's board never reads it, so `backlog.md` and `next` are unchanged and the board still works with the server stopped. If a sync's events cannot be stored, the job update still lands and the server says so in its response. A database written by a newer version is refused at startup rather than downgraded.
 
 ## Board script reference
 

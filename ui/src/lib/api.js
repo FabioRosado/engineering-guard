@@ -42,3 +42,14 @@ export async function archiveJob(job, reason, fetchImpl = fetch) {
   });
   await readJson(response, "archive");
 }
+
+// Unlike archive there is no default reason: abandoning discards work, so the board insists on
+// a real one and the server reports it as a 400 when it is blank.
+export async function abandonJob(job, reason, fetchImpl = fetch) {
+  const response = await fetchImpl("/api/jobs/abandon", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: job.id, repo_path: job.repo_path, reason }),
+  });
+  await readJson(response, "abandon");
+}

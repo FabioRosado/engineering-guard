@@ -275,6 +275,31 @@ Known follow-ups: the gate currently fails on this repo until you accept the new
 `.quality-gate.json` (`config-edit`); the generic-name list and `.quality-gate.json` schema are
 implementation proposals awaiting your review; README documentation of the gate is not yet written.
 
+## Post-implementation changes (2026-10-30, requested by the developer; not a new approved revision)
+
+Found by running the gate against a real repository (`model-pipelines`):
+
+- **bandit is scoped to added lines.** It scanned whole files, so existing B108 hits in files a job
+  merely touched failed the gate. The gate now runs `bandit -f json` and keeps only issues whose
+  `line_range` intersects the added lines, the same rule every other check follows. A file bandit
+  cannot parse (JSON `errors`, exit 0) now fails instead of passing, and unreadable output fails.
+  Accepted trade-off: an existing line made unsafe by an edit elsewhere is not reported.
+- **A failed check explains itself.** `quality-gate.md` omitted a failed check's output, so a failure
+  such as bandit's showed only `bandit: fail`. It now prints the output tail for failed checks.
+- **`quality_gate.py --init` proposes `.quality-gate.json`.** Criterion 4 still holds: commands run only
+  if declared. `--init` reads files (never runs a command), prefers the repository's own entry point
+  (Make target, npm script, then a configured tool), recognises only a fixed allowlist of names so
+  `system-test` and `deploy-*` are never proposed, proposes format in check mode only, and never
+  overwrites. A human reviews and commits the result before a job, so the trust boundary
+  (`config-edit` is tamper) is unchanged. Rejected: detecting at run time with no file, because the
+  commands would come from files an agent in the same job may have edited and there would be no place
+  for a human to correct a wrong guess.
+- `not_configured` messages now name `--init`.
+
+Not changed, found while testing: `test_missing_optional_tool_warns_with_install_hint_and_does_not_fail`
+fails on any machine where git and gitleaks share a directory (it keeps git's directory on `PATH` to
+hide gitleaks). It failed before these changes and is not fixed here.
+
 ## Revision and approval status
 
 **Status:** Revision 2 accepted by the developer on 2026-10-30 ("accept and let's implement").

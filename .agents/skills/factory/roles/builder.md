@@ -44,6 +44,9 @@ Overwrite it each round with:
 - **Changes:** files touched and why
 - **Acceptance criteria:** each criterion from the spec → how it is met and
   which test proves it
+- **Edge cases** (when the spec has them): each entry → the test that covers it, or why it
+  is not covered. An entry marked `no criterion — for human decision` is not yours to
+  promote: cover it only if it is cheap and says so, otherwise list it under known gaps.
 - **Checks run:** exact commands and real results (pass/fail counts)
 - **Review findings addressed** (round 2+): finding → fix or rebuttal
 - **Quality gate warnings addressed** (gate-fix round): every warning id from

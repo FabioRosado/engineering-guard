@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiError, archiveJob, fetchJobs } from "./api.js";
+import { ApiError, abandonJob, archiveJob, fetchJobs } from "./api.js";
 
 function reply(status, body) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
@@ -71,5 +71,20 @@ describe("archiveJob", () => {
     const attempt = archiveJob({ id: "1", repo_path: "/r" }, "", fetchImpl);
     await expect(attempt).rejects.toBeInstanceOf(ApiError);
     await expect(attempt).rejects.toThrow(/job is not needs-human/);
+  });
+});
+
+describe("abandonJob", () => {
+  it("posts the job identity and the reason to the abandon route", async () => {
+    const { fetchImpl, calls } = server({ "/api/jobs/abandon": reply(200, { ok: true }) });
+    await abandonJob({ id: "001-x", repo_path: "/repo" }, "wrong approach", fetchImpl);
+    expect(calls[0].options.method).toBe("POST");
+    expect(JSON.parse(calls[0].options.body)).toEqual({ id: "001-x", repo_path: "/repo", reason: "wrong approach" });
+  });
+
+  it("does not invent a reason when none is given", async () => {
+    const { fetchImpl, calls } = server({ "/api/jobs/abandon": reply(400, { error: "abandon needs a reason" }) });
+    await expect(abandonJob({ id: "1", repo_path: "/r" }, "", fetchImpl)).rejects.toThrow(/abandon needs a reason/);
+    expect(JSON.parse(calls[0].options.body).reason).toBe("");
   });
 });

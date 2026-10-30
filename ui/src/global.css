@@ -584,7 +584,9 @@
 
   .archive-dialog {
     width: min(480px, 92vw);
-    height: auto;
+    /* fit-content, not auto: a modal dialog is position: fixed with both block insets set, so
+       auto stretches it to max-height instead of wrapping its form. */
+    height: fit-content;
     max-height: 90vh;
     overflow: auto;
   }
@@ -687,10 +689,14 @@
 
   .modal-body {
     display: grid;
-    grid-template-columns: 240px 1fr;
-    height: calc(100% - 51px);
+    grid-template-columns: minmax(0, 1fr);
+    flex: 1;
     min-height: 0;
   }
+
+  /* Only file scopes (Documents, Round N) have a sidebar; Overview, Stats and Notes use the
+     full width. */
+  .modal-body.has-sidebar { grid-template-columns: 240px minmax(0, 1fr); }
 
   dialog::backdrop {
     background: rgba(10, 11, 15, 0.55);
@@ -701,6 +707,13 @@
 
   dialog[open] {
     animation: modal-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /* Header, scope bar and body stack without fixed height math, so the body takes whatever
+     the bars leave. The archive dialog sizes to its own content instead. */
+  dialog[open]:not(.archive-dialog) {
+    display: flex;
+    flex-direction: column;
   }
 
   @keyframes modal-in {
@@ -773,9 +786,119 @@
   .archive-btn:active { transform: scale(0.97); }
   .archive-btn svg { width: 14px; height: 14px; }
 
-  /* File sidebar: vertical list so every file is visible at once, however many
-     rounds a job has accumulated, instead of a horizontal strip that hides most
-     files behind scroll with no indication of what's off-screen. */
+  /* Abandon is destructive, so in the header it stays a quiet outlined button next to the
+     filled Archive action and only turns red when the pointer or focus is on it. The confirm
+     button in the dialog is the loud one. */
+  .abandon-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink-soft);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 8px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  }
+
+  .abandon-btn:hover,
+  .abandon-btn:focus-visible {
+    background: var(--danger-bg);
+    color: var(--danger);
+    border-color: var(--danger-line);
+  }
+
+  .abandon-btn svg { width: 14px; height: 14px; }
+
+  .archive-btn.danger {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #fff;
+  }
+
+  /* --danger is a light pink in dark mode, where white text on it is unreadable. */
+  body.dark .archive-btn.danger { color: #3a1010; }
+
+  .archive-btn:disabled { opacity: 0.6; cursor: default; }
+
+  /* Scope bar: the top-level sections of a job (dashboard views, then Documents and one
+     scope per round). Same underline language as the page tabs. */
+  .scope-bar {
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+    overflow-x: auto;
+    scrollbar-width: none;
+    flex: none;
+  }
+
+  .scope-bar::-webkit-scrollbar { display: none; }
+
+  .scope-tab {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 12px;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 620;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: color 120ms ease;
+  }
+
+  .scope-tab::after {
+    content: "";
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: -1px;
+    height: 2px;
+    border-radius: 2px 2px 0 0;
+    background: transparent;
+    transition: background 120ms ease;
+  }
+
+  .scope-tab:hover { color: var(--ink-soft); }
+  .scope-tab.active { color: var(--ink); }
+  .scope-tab.active::after { background: var(--ink); }
+
+  .scope-count {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    background: var(--surface-sunken);
+    border-radius: 100px;
+    padding: 1px 6px;
+  }
+
+  .scope-tab.active .scope-count { color: var(--ink); }
+
+  /* Separates the dashboard views from the job's own files. */
+  .scope-divider {
+    flex: none;
+    align-self: center;
+    width: 1px;
+    height: 16px;
+    margin: 0 6px;
+    background: var(--line);
+  }
+
+  /* File sidebar: lists the files of the current scope only, so even a job with many
+     rounds shows a short, scannable list. */
   .file-tabs {
     display: flex;
     flex-direction: column;
@@ -983,14 +1106,14 @@
     .jobs-grid { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
 
     dialog { width: 94vw; height: 86vh; }
-    .modal-body { grid-template-columns: 180px 1fr; }
+    .modal-body.has-sidebar { grid-template-columns: 180px minmax(0, 1fr); }
   }
 
   @media (max-width: 640px) {
     /* A fixed-width sidebar doesn't fit a phone screen: collapse the file list
        back into a horizontal scrolling strip above the content, stacked instead
        of side-by-side. */
-    .modal-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    .modal-body.has-sidebar { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
 
     .file-tabs {
       flex-direction: row;
@@ -1017,7 +1140,7 @@
     .pipeline-grid { grid-auto-columns: minmax(170px, 78vw); }
     .jobs-grid { grid-template-columns: 1fr; }
 
-    dialog { width: 100vw; height: 100vh; height: 100dvh; border-radius: 0; }
+    dialog[open]:not(.archive-dialog) { width: 100vw; max-width: 100vw; height: 100vh; height: 100dvh; max-height: 100dvh; border-radius: 0; }
     .viewer-content { padding: 18px 16px 28px; }
     .modal-title { font-size: 11.5px; }
 
@@ -1054,6 +1177,95 @@
 
 .diagram svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
 
+/* Interactive diagrams: a toolbar above a clipped viewport. The picture is moved with a CSS
+   transform, so the diagram itself never reflows. */
+.diagram-interactive { padding: 0; overflow: hidden; }
+
+.diagram-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-sunken);
+}
+
+.diagram-button {
+  min-width: 30px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.diagram-button:hover { background: var(--surface-hover); border-color: var(--line-strong); color: var(--ink); }
+.diagram-button:last-child { margin-left: auto; }
+
+.diagram-scale {
+  min-width: 46px;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.diagram-viewport {
+  position: relative;
+  height: clamp(220px, 46vh, 480px);
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;           /* the app handles drags; the browser must not scroll the page instead */
+  user-select: none;
+  background: var(--surface);
+}
+
+.diagram-viewport.dragging { cursor: grabbing; }
+.diagram-viewport:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+.diagram-stage { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
+.diagram-stage svg { display: block; max-width: none; margin: 0; }
+
+.diagram-dialog {
+  width: min(1500px, 96vw);
+  height: min(92vh, 1000px);
+  padding: 0;
+  border: none;
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.diagram-dialog::backdrop { background: rgba(10, 11, 15, 0.6); backdrop-filter: blur(3px); }
+
+.diagram-dialog-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.diagram-expanded { height: 100%; margin: 0; border: none; border-radius: 0; }
+.diagram-expanded .diagram-viewport { height: calc(100% - 39px); }
+
 .diagram-pending { color: var(--muted); font-size: 12.5px; }
 
 .diagram-error {
@@ -1082,3 +1294,29 @@
 
 .overview-document .markdown > h1 { margin-bottom: 0.4em; border-bottom: none; padding-bottom: 0; }
 .overview-document .markdown > h1 + h2 { margin-top: 0.6em; }
+
+/* ---------------------------------- Tasks ---------------------------------- */
+
+/* The task panel sits beside the board instead of over it: writing a prompt while looking at the
+   running jobs and other tasks is the point, so it does not take the page away like a modal. */
+.tasks-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: start; }
+.tasks-layout:has(.task-panel) { grid-template-columns: minmax(0, 1fr) 380px; }
+.tasks-main { min-width: 0; }
+
+.task-panel {
+  position: sticky;
+  top: 118px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 142px);
+  min-height: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+@media (max-width: 1100px) {
+  .tasks-layout:has(.task-panel) { grid-template-columns: minmax(0, 1fr); }
+  .task-panel { position: static; max-height: none; }
+}

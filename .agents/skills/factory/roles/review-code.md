@@ -18,8 +18,9 @@ the `architecture` reviewer owns that, and reporting it twice sends the builder 
 one finding.
 
 **Regression check.** Compare the diff against the spec's acceptance
-criteria: does it change any existing behaviour, public contract, or adjacent
-code path that the acceptance criteria do not call for? If the spec is a bug
+criteria (and its **Compatibility** section, when it has one, which names the contracts,
+stored data and callers that must not change): does it change any existing behaviour, public
+contract, or adjacent code path that the acceptance criteria do not call for? If the spec is a bug
 fix, the fixed behaviour is expected to change — that is not a regression.
 An unrelated behaviour change is. For each one found, record in your file:
 
@@ -35,6 +36,7 @@ The first line of the file must be exactly one of:
 ```
 VERDICT: PASS
 VERDICT: CHANGES
+VERDICT: BLOCKED
 ```
 
 `CHANGES` requires at least one concrete, actionable finding (file:line,
@@ -42,3 +44,7 @@ problem, expected fix). Style preferences alone are not `CHANGES`. A
 regression finding justifies `CHANGES` only when it is not required by an
 acceptance criterion and has a concrete impact; note lower-impact or
 intentional behaviour changes under `PASS` instead.
+
+## Findings and BLOCKED
+
+Your finding prefix is `code`. Follow `findings.md` (in this folder) for the `FINDING:` line format, id reuse across rounds, and the `BLOCKED` verdict.

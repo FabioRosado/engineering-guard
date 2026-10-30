@@ -89,6 +89,17 @@ same 2-round review budget as security/ux/ui/code/architecture.
   `CHANGES` must additionally cite a finding with `SEVERITY: CRITICAL` or
   `SEVERITY: HIGH` (MEDIUM/LOW/hardening-only findings belong under `PASS`);
   `decision.md` starts with `ESCALATE`. The board script rejects anything else.
+- **Findings.** Every problem a reviewer or the test auditor reports is also one
+  `FINDING: <role>-<n> | SEVERITY: ... | LOCATION: ... | STATUS: open|closed|disputed` line
+  (`roles/findings.md`). Ids are reused across rounds and only the raising role may close one;
+  the board follows them into `job.findings` and `job.unresolved`. A malformed line makes that
+  file `invalid`, so re-spawn only that reviewer, as for any invalid file. Warnings such as
+  "re-raised" or "neither restates nor closes" are for the human and the approver; do not
+  act on them yourself.
+- **BLOCKED.** A reviewer, the test auditor or STRIDE may write `VERDICT: BLOCKED` plus a
+  reason when it cannot assess the change. The board moves the job to `needs-human` without
+  spending a round (`next: needs-human`). Stop and report the reason; do not re-spawn it or
+  start the builder. `rework` reopens the job.
 - **Handover.** `<job>/handover.md` is the living, human-facing summary: executive summary,
   optional mermaid diagrams, changed components, verification, risks. The spec-writer writes
   the proposal, the builder keeps it describing what was built (`spec.md` stays frozen), the
@@ -183,16 +194,19 @@ job is building. Then run the build loop:
      happens again, stop and report.
 2. Spawn **test-auditor** with `base` and `round-N/`, then
    `FACTORY test-audit-done <id>` and follow `next`:
+   - `needs-human` → the auditor wrote `BLOCKED`: stop and report its reason.
    - `rebuild` → back to step 1 (round increased).
    - `review` → continue with the reviewers listed in `spawn`. UI may be
      missing: the script already wrote its `N/A` because the spec says
      `UI impact: no` and no changed file is visual. UX always runs.
 3. Spawn the reviewers from `spawn` in parallel with `base` and `round-N/`.
 4. `FACTORY round-status <id>` until `complete`, then `FACTORY close-round <id>` and follow `next`:
+   - `needs-human` → a reviewer wrote `BLOCKED`: stop and report which one and why.
    - `rebuild` → back to step 1 (round increased).
    - `stride-review` → continue with step 5.
 5. Spawn **stride** once (not per round) with `base` and the current
    `round-N/`, then `FACTORY stride-review-done <id>` and follow `next`:
+   - `needs-human` → stride wrote `BLOCKED`: stop and report its reason.
    - `rebuild` → back to step 1 (round increased).
    - `quality-gate` → `FACTORY quality-gate-done <id>`, then follow `next`:
      `rebuild` → spawn the builder (a gate-fix round) and `FACTORY build-done <id>`,
@@ -238,6 +252,9 @@ the human decides whether to keep or discard them.
 `FACTORY archive <id> "<reason>"` closes an approved `needs-human` job and moves
 it to the Archive tab. Used by `approve`; the human can also trigger it from the
 dashboard's Archive job button. Code changes stay in the worktree.
+
+`FACTORY abandon <id> "<reason>"` closes a job at any open stage; the dashboard's
+Abandon button calls the same command.
 
 ## Dashboard
 

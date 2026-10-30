@@ -33,6 +33,11 @@ few minutes. Keep its sections, and write the ones that apply:
   predate the last gate-fix edit, so the human should read that diff.
 - **Review summary:** `Round N: tests PASS, security PASS, ux N/A, ui N/A, code CHANGES → fixed
   in round N+1, architecture PASS ...`, and any findings still open after the last round.
+  Take the open findings from `unresolved` and `findings` in `board.json` (run
+  `FACTORY show <id>`), not by comparing review files: list each id with its severity,
+  location and round first raised, and quote the board's "re-raised" and "neither restates
+  nor closes" warnings. A job with no `findings` entries predates the format, or its
+  reviewers wrote none; read its review files.
 - **Risks and observations:** what the human should weigh before approving.
 
 Mermaid blocks must be valid: the board parses them and rejects `decision` otherwise. Use

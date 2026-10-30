@@ -204,6 +204,29 @@ Both phases are implemented. Facts learned along the way, and deviations from th
   `DESIGN.md`, README, `docs/factory.md`, `SKILL.md`, the factory-server command and the demo
   scenario were updated; the older records are left as the history of what was decided then.
 
+### Diagram pan and zoom (2026-10-30, follow-up request)
+
+Rendered diagrams were fixed-size pictures, so a wide diagram could not be inspected. Added:
+
+- **Controls.** Zoom in and out, a scale readout, Fit, actual size (1:1) and Expand, plus drag to
+  pan, double-click to fit, and `+`, `-`, `0` and arrow keys when the diagram has focus.
+- **Wheel behaviour.** A plain wheel scrolls the document; zoom needs Ctrl or Command with the wheel
+  (which is also how a trackpad pinch arrives). A diagram embedded in a long document would
+  otherwise trap the reader's scrolling.
+- **No new dependency.** The maths is a pure module (`ui/src/lib/panzoom.js`, 19 tests) and the DOM
+  controller is `ui/src/lib/diagram-viewer.js`. It is a controller attached to the placeholder rather
+  than a Svelte component because `{@html}` creates the placeholders outside Svelte's control, and a
+  theme change redraws the picture inside them; the controller swaps only the SVG, so the reader's
+  zoom and position survive a redraw and the 2-second poll.
+- **Expand** opens the same diagram in a large dialog with its own controls, drawn at fit size.
+- **Found while verifying:** the server now keeps a SQLite database whose path is computed from
+  `DATA_DIR` at import time, so reassigning `DATA_DIR` alone would still write test data to the real
+  database. The browser harness reassigns every path and asserts none resolves under the real
+  data directory before it starts.
+- **Verification:** 21 checks in headless Chrome (buttons, wheel versus Ctrl-wheel, drag, keyboard,
+  poll and theme persistence, expand and close). Not tested: touch pinch on a real device, which
+  the pointer-capture and `touch-action: none` setup is intended to support but was not exercised.
+
 ## Developer decisions
 
 | # | Decision | Date |

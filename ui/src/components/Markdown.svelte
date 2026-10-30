@@ -1,4 +1,5 @@
 <script>
+  import { attachDiagramViewer } from "../lib/diagram-viewer.js";
   import { renderDiagram } from "../lib/diagrams.js";
   import { decodeDiagram, renderMarkdown } from "../lib/markdown.js";
   import { app } from "../lib/store.svelte.js";
@@ -9,6 +10,11 @@
   // and a new string identity must not rebuild the diagrams or they would flicker.
   let html = $derived(renderMarkdown(source));
   let container = $state();
+
+  // One viewer per placeholder, kept across redraws so a theme change swaps the picture without
+  // resetting the reader's zoom and position. A WeakMap drops them with their placeholders.
+  const viewers = new WeakMap();
+  let openDialogs = [];
 
   // Diagrams are drawn after the HTML is in place. A run counter discards a render that finished
   // after a newer one started (a quick theme toggle, or a job that changed while mermaid loaded).
@@ -41,12 +47,53 @@
     if (run !== latestRun || !placeholder.isConnected) return;
     placeholder.classList.remove("diagram-pending", "diagram-error");
     if (result.svg) {
+      let viewer = viewers.get(placeholder);
+      if (!viewer) {
+        viewer = attachDiagramViewer(placeholder, {
+          onexpand: () => expand(decodeDiagram(placeholder.getAttribute("data-mermaid"))),
+        });
+        viewers.set(placeholder, viewer);
+      }
       // Mermaid's own output at securityLevel "strict": its labels are already escaped.
-      placeholder.innerHTML = result.svg;
+      viewer.setSvg(result.svg);
     } else {
+      viewers.get(placeholder)?.destroy();
+      viewers.delete(placeholder);
       showError(placeholder, result.error, diagramSource);
     }
   }
+
+  // The same diagram in a large dialog, drawn in the current theme with its own pan and zoom.
+  async function expand(diagramSource) {
+    const dialog = document.createElement("dialog");
+    dialog.className = "diagram-dialog";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "diagram-dialog-close";
+    close.textContent = "Close";
+    close.addEventListener("click", () => dialog.close());
+    const holder = document.createElement("div");
+    holder.className = "diagram diagram-expanded";
+    dialog.append(close, holder);
+    document.body.append(dialog);
+    openDialogs.push(dialog);
+
+    const viewer = attachDiagramViewer(holder);
+    dialog.addEventListener("close", () => {
+      viewer.destroy();
+      dialog.remove();
+      openDialogs = openDialogs.filter((open) => open !== dialog);
+    });
+    dialog.showModal();
+    const result = await renderDiagram(diagramSource, app.theme);
+    if (result.svg) viewer.setSvg(result.svg);
+    else showError(holder, result.error, diagramSource);
+  }
+
+  // A dialog is appended to the body, outside this component, so it must be closed with it.
+  $effect(() => () => {
+    for (const dialog of openDialogs) dialog.close();
+  });
 
   // A failed diagram shows what went wrong and the source, never an empty gap. Built with DOM
   // calls and textContent so nothing in the error text or the source is read as markup.

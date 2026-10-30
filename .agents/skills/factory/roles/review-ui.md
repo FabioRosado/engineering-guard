@@ -19,5 +19,9 @@ Otherwise review the visual design of the change against the existing UI:
 - Contrast and states: readable contrast; hover, focus, disabled, error styles.
 - No one-off styles where a shared style exists.
 
-First line must be `VERDICT: PASS` or `VERDICT: CHANGES`. `CHANGES` needs
+First line must be `VERDICT: PASS`, `VERDICT: CHANGES` or `VERDICT: BLOCKED`. `CHANGES` needs
 concrete findings with file:line and the expected fix.
+
+## Findings and BLOCKED
+
+Your finding prefix is `ui`. Follow `findings.md` (in this folder) for the `FINDING:` line format, id reuse across rounds, and the `BLOCKED` verdict.

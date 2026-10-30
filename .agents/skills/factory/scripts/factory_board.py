@@ -35,14 +35,17 @@ REVIEWERS = ("security", "ux", "ui", "code", "architecture")
 # Only UX, UI and architecture can be "not applicable": every change has code and a security
 # surface, so N/A from those reviewers would let a round pass with nothing reviewed. A small
 # fix has no architecture to compare, so architecture may be N/A (decision D36).
+# BLOCKED means the reviewer could not assess the change at all (decision D46). It is distinct
+# from CHANGES, which asks the builder to fix something: a blocked review has nothing for the
+# builder to act on, so the job goes to the human, as a blocked builder does.
 ALLOWED_VERDICTS = {
-    "tests": ("PASS", "CHANGES"),
-    "security": ("PASS", "CHANGES"),
-    "code": ("PASS", "CHANGES"),
-    "ux": ("PASS", "CHANGES", "N/A"),
-    "ui": ("PASS", "CHANGES", "N/A"),
-    "architecture": ("PASS", "CHANGES", "N/A"),
-    "stride": ("PASS", "CHANGES"),
+    "tests": ("PASS", "CHANGES", "BLOCKED"),
+    "security": ("PASS", "CHANGES", "BLOCKED"),
+    "code": ("PASS", "CHANGES", "BLOCKED"),
+    "ux": ("PASS", "CHANGES", "N/A", "BLOCKED"),
+    "ui": ("PASS", "CHANGES", "N/A", "BLOCKED"),
+    "architecture": ("PASS", "CHANGES", "N/A", "BLOCKED"),
+    "stride": ("PASS", "CHANGES", "BLOCKED"),
 }
 # Roles whose CHANGES verdict must cite at least one CRITICAL/HIGH finding (decision
 # SD1 in decisions/stride-threat-model.md): a MEDIUM/LOW/hardening-only report should
@@ -64,6 +67,11 @@ SPEC_STATUS_LINE = re.compile(r"^\*\*Status:\*\*.*$", re.MULTILINE)
 # Anchored to the spec's own field line so a quoted draft or prose mention does not match.
 UI_IMPACT_NO = re.compile(r"^\W*UI impact\W*no\b", re.IGNORECASE | re.MULTILINE)
 ARCHITECTURE_IMPACT_NO = re.compile(r"^\W*Architecture impact\W*no\b", re.IGNORECASE | re.MULTILINE)
+# Any line that starts with an impact label, whatever it says. The spec's own field is the first
+# such line, so a later line in another section that happens to begin the same way (for example
+# under "User-facing surface") must not be able to overrule it.
+UI_IMPACT_LINE = re.compile(r"^\W*UI impact\b.*$", re.IGNORECASE | re.MULTILINE)
+ARCHITECTURE_IMPACT_LINE = re.compile(r"^\W*Architecture impact\b.*$", re.IGNORECASE | re.MULTILINE)
 # The handover is the living, builder-updated home of the diagrams: spec.md is frozen once
 # approved, so it cannot track a build that changes shape (decision D33).
 HANDOVER_FILE = "handover.md"
@@ -80,8 +88,33 @@ USER_FACING_SUFFIXES = (
     ".vue", ".svelte", ".astro", ".erb", ".jinja", ".j2", ".hbs", ".svg", ".png", ".jpg",
     ".jpeg", ".gif", ".webp", ".ico",
 )
+# Which file each role writes its findings into, for the cross-round ledger. Order is the
+# order findings are read within a round.
+FINDING_FILES = (
+    ("tests", "test-audit.md"),
+    ("security", "review-security.md"),
+    ("ux", "review-ux.md"),
+    ("ui", "review-ui.md"),
+    ("code", "review-code.md"),
+    ("architecture", "review-architecture.md"),
+    ("stride", "review-stride.md"),
+)
 BLOCKED_HEADER = re.compile(r"^BLOCKED\b")
-VERDICT_HEADER = re.compile(r"^VERDICT:\s*(PASS|CHANGES|N/A)\s*$")
+VERDICT_HEADER = re.compile(r"^VERDICT:\s*(PASS|CHANGES|N/A|BLOCKED)\s*$")
+# One line per finding, written by the reviewer (decision D41). The id is assigned and reused by
+# the reviewer rather than hashed from the prose: real findings are long and reworded between
+# rounds, so a content hash would change every round. The id prefix names the role that raised
+# it, which is how the board enforces that only that role may close it (decision D47).
+FINDING_LINE = re.compile(
+    r"^FINDING:\s*(?P<id>[a-z]+-\d+)\s*\|\s*"
+    r"SEVERITY:\s*(?P<severity>CRITICAL|HIGH|MEDIUM|LOW|INFO)\s*\|\s*"
+    r"LOCATION:\s*(?P<location>\S+)\s*\|\s*"
+    r"STATUS:\s*(?P<status>open|closed|disputed)\s*$",
+    re.MULTILINE,
+)
+# Anything starting FINDING: that FINDING_LINE rejects is reported rather than silently ignored,
+# because a mistyped line would otherwise make a finding vanish from the unresolved list.
+FINDING_PREFIX = re.compile(r"^FINDING:", re.MULTILINE)
 DECISION_HEADER = re.compile(r"^ESCALATE\b")
 TERMINAL_STAGES = ("abandoned",)
 # Full ordered pipeline, including human-gate and terminal stages, for display
@@ -323,12 +356,30 @@ class Factory:
             str(path.relative_to(directory)) for path in directory.rglob("*.md")
         )
         job["updated"] = utc_now()
+        self.record_stage_event(job)
         self.write_json(self.board_path, board)
         if push:
             # Push job state to central factory server (non-blocking). The central
             # server itself archives by importing this module, and pushing from
             # inside that request would deadlock its single-threaded loop.
             _push_to_central_server(board, job, self.repository_root)
+
+    @staticmethod
+    def record_stage_event(job):
+        """Append a timestamped event when the job's (stage, round) differs from the last one.
+
+        `save` is the single place every transition passes through, so comparing here covers all
+        of them without touching each stage change. The round is part of the identity because a
+        rebuild re-enters a stage name the job has already visited. The dashboard derives its run
+        statistics from these events (decisions/factory-workspace.md, D54); they measure when the
+        board saw a transition, not how long an agent computed. A job created before events
+        existed starts recording from its current stage: history the board never saw is not
+        invented.
+        """
+        events = job.setdefault("events", [])
+        if events and (events[-1]["stage"], events[-1]["round"]) == (job["stage"], job["round"]):
+            return
+        events.append({"stage": job["stage"], "round": job["round"], "at": job["updated"]})
 
     @staticmethod
     def require_stage(job, *allowed):
@@ -728,6 +779,9 @@ class Factory:
             raise FactoryError(f"{path.relative_to(self.repository_root)}: {problem}")
         job["test_audit"] = verdict
         job["warnings"] = self.head_warnings(job)
+        job["warnings"] += self.refresh_findings(job)
+        if verdict == "BLOCKED":
+            return self.block_for_human(board, job, "tests", path)
         attempt = job["attempt"]
         if verdict == "CHANGES" and attempt["test_rebuilds"] < TEST_REBUILDS_PER_ATTEMPT:
             attempt["test_rebuilds"] += 1
@@ -773,7 +827,7 @@ class Factory:
             path for path in job.get("changed_files", [])
             if path.lower().endswith(USER_FACING_SUFFIXES)
         ]
-        if UI_IMPACT_NO.search(spec) and not user_facing:
+        if spec_field_says_no(spec, UI_IMPACT_LINE, UI_IMPACT_NO) and not user_facing:
             (round_directory / "review-ui.md").write_text(
                 "VERDICT: N/A\n"
                 "Written by factory_board.py: the spec says `UI impact: no` and no changed "
@@ -786,7 +840,7 @@ class Factory:
         # Skipping a review on a wrong "no diagram" would hide a change, so anything that might be a
         # diagram keeps the reviewer on; only a handover with no hint of one is skipped.
         has_diagram = handover.is_file() and MAYBE_DIAGRAM.search(handover.read_text(encoding="utf-8"))
-        if ARCHITECTURE_IMPACT_NO.search(spec) and not has_diagram:
+        if spec_field_says_no(spec, ARCHITECTURE_IMPACT_LINE, ARCHITECTURE_IMPACT_NO) and not has_diagram:
             (round_directory / "review-architecture.md").write_text(
                 "VERDICT: N/A\n"
                 "Written by factory_board.py: the spec says `Architecture impact: no` and "
@@ -795,6 +849,100 @@ class Factory:
             )
             skipped.append("architecture")
         return skipped
+
+    def block_for_human(self, board, job, role, path):
+        """Send the job to the human because a reviewer could not assess the change (D46).
+
+        Mirrors a blocked builder (build_done): no further rounds are spent, because there is
+        nothing for the builder to fix. The reason is the text under the verdict line, copied
+        into a warning so the human sees it on the card without opening the file.
+        """
+        reason = path.read_text(encoding="utf-8").strip().split("\n", 1)[1].strip().splitlines()[0]
+        job["stage"] = "needs-human"
+        # A blocked gate-fix round must not leave "fixing" behind (see rework and build_done).
+        job["quality_gate"] = None
+        job["warnings"].append(f"{role} review blocked in round {job['round']}: {reason}")
+        job["history"].append({"round": job["round"], "blocked": role, "reason": reason})
+        self.save(board, job)
+        return {"job": job, "next": "needs-human"}
+
+    def derive_findings(self, job):
+        """Rebuild the job's finding ledger from every round's review files.
+
+        Derived rather than stored incrementally: the files are the source of truth, so a
+        repeated or interrupted command can never leave the ledger out of step with them.
+        Returns (ledger, notices). Notices are warnings about reviewer behaviour, never
+        errors, because the id convention is followed by an LLM and is not yet measured
+        (decision record, verification: ID-reuse measurement).
+
+        A job with no FINDING lines at all gets an empty ledger and no notices, so jobs
+        and reviews written before this format existed behave exactly as they did.
+        """
+        job_directory = self.job_directory(job["id"])
+        ledger = {}
+        notices = []
+        round_numbers = sorted(
+            int(path.name.split("-", 1)[1]) for path in job_directory.glob("round-*") if path.is_dir()
+        )
+        previous_open = set()
+        for round_number in round_numbers:
+            round_directory = job_directory / f"round-{round_number}"
+            raised_this_round = set()
+            closed_this_round = set()
+            for role, filename in FINDING_FILES:
+                path = round_directory / filename
+                if not path.is_file():
+                    continue
+                for finding in parse_findings(path.read_text(encoding="utf-8")):
+                    identifier = finding["id"]
+                    raised_this_round.add(identifier)
+                    entry = ledger.setdefault(identifier, {
+                        "role": role, "severity": finding["severity"],
+                        "location": finding["location"], "first_round": round_number,
+                        "status": finding["status"], "reopened": False,
+                    })
+                    if finding["status"] == "open" and entry["status"] == "closed":
+                        # Closed in an earlier round and open again: the oscillation signal.
+                        entry["reopened"] = True
+                        notices.append(f"finding {identifier} was closed and re-raised in round {round_number}")
+                    if finding["status"] == "closed":
+                        closed_this_round.add(identifier)
+                    entry.update(
+                        severity=finding["severity"], location=finding["location"],
+                        status=finding["status"], last_round=round_number,
+                    )
+            # A finding that was open last round and is neither restated nor closed was dropped
+            # without a word. Only warn for roles that ran this round: an N/A or skipped
+            # reviewer legitimately restates nothing.
+            for identifier in sorted(previous_open - raised_this_round - closed_this_round):
+                if self.role_ran_in_round(round_directory, ledger[identifier]["role"]):
+                    notices.append(
+                        f"finding {identifier} was open in the previous round but round "
+                        f"{round_number} neither restates nor closes it"
+                    )
+                    # Keep it open: silence is not a fix.
+            previous_open = {
+                identifier for identifier, entry in ledger.items() if entry["status"] != "closed"
+            }
+        return ledger, notices
+
+    @staticmethod
+    def role_ran_in_round(round_directory, role):
+        filename = dict(FINDING_FILES)[role]
+        path = round_directory / filename
+        if not path.is_file():
+            return False
+        verdict = VERDICT_HEADER.match(first_content_line(path.read_text(encoding="utf-8")))
+        return bool(verdict) and verdict.group(1) != "N/A"
+
+    def refresh_findings(self, job):
+        """Store the ledger and its unresolved list on the job, returning notices to warn on."""
+        ledger, notices = self.derive_findings(job)
+        job["findings"] = ledger
+        job["unresolved"] = sorted(
+            identifier for identifier, entry in ledger.items() if entry["status"] != "closed"
+        )
+        return notices
 
     def read_reviews(self, job):
         round_directory = self.job_directory(job["id"]) / f"round-{job['round']}"
@@ -837,6 +985,7 @@ class Factory:
         self.require_stage(job, "review")
         reviews, invalid = self.read_reviews(job)
         job["reviews"] = reviews
+        self.refresh_findings(job)
         self.save(board, job)
         complete = all(verdict not in ("pending", "invalid") for verdict in reviews.values())
         return {
@@ -865,9 +1014,15 @@ class Factory:
         job["warnings"] = self.head_warnings(job)
         if job["test_audit"] == "CHANGES":
             job["warnings"].append(f"test audit still requests changes after round {job['round']}")
+        job["warnings"] += self.refresh_findings(job)
         job["history"].append(
             {"round": job["round"], "test_audit": job["test_audit"], "reviews": dict(reviews)}
         )
+        blocked = [reviewer for reviewer, verdict in reviews.items() if verdict == "BLOCKED"]
+        if blocked:
+            # No rebuild: a reviewer that could not assess left nothing for the builder to fix.
+            path = self.job_directory(job_id) / f"round-{job['round']}" / f"review-{blocked[0]}.md"
+            return self.block_for_human(board, job, blocked[0], path)
         attempt = job["attempt"]
         attempt["review_rounds"] += 1
         if "CHANGES" in reviews.values() and attempt["review_rounds"] < REVIEW_ROUNDS_PER_ATTEMPT:
@@ -901,6 +1056,9 @@ class Factory:
             raise FactoryError(f"{path.relative_to(self.repository_root)}: {problem}")
         job["stride"] = verdict
         job["warnings"] = self.head_warnings(job)
+        job["warnings"] += self.refresh_findings(job)
+        if verdict == "BLOCKED":
+            return self.block_for_human(board, job, "stride", path)
         attempt = job["attempt"]
         if verdict == "CHANGES" and attempt["review_rounds"] < REVIEW_ROUNDS_PER_ATTEMPT:
             attempt["review_rounds"] += 1
@@ -1010,8 +1168,12 @@ class Factory:
             for e in report["tamper"]
         ] or ["None"]
         lines += ["", "## Checks"]
-        lines += [f"- {c['name']}: {c['status']}" + (f" ({c['message']})" if c.get("message") else "")
-                  for c in report["checks"]]
+        for check in report["checks"]:
+            lines.append(f"- {check['name']}: {check['status']}"
+                         + (f" ({check['message']})" if check.get("message") else ""))
+            # A failed check must say why, or the human and the next builder cannot act on it.
+            if check["status"] == "fail" and check.get("output"):
+                lines += ["", "  ```text", *[f"  {line}" for line in check["output"].splitlines()], "  ```", ""]
         (round_directory / "quality-gate.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def accept_suppression(self, job_id, entry_id, reason):
@@ -1056,6 +1218,11 @@ class Factory:
         diagram_warning = self.require_valid_diagrams(job_id)
         if diagram_warning:
             job["warnings"].append(diagram_warning)
+        # Name what is still open so the human sees the findings, not only that "a review still
+        # requests changes". Empty for jobs that predate structured findings.
+        self.refresh_findings(job)
+        if job["unresolved"]:
+            job["warnings"].append("unresolved findings: " + ", ".join(job["unresolved"]))
         job["stage"] = "needs-human"
         self.save(board, job)
         return job
@@ -1146,6 +1313,13 @@ class Factory:
                 "needs-human": "stop: the human reads decision.md and runs approve or rework",
                 "abandoned": "nothing: the job is closed (archived or abandoned)",
             }[stage]
+            if stage == "needs-human" and not (self.job_directory(job_id) / "decision.md").is_file():
+                # A blocked builder or reviewer parks the job before the approver ever runs, so
+                # there is no decision.md to read; the reason is in the job's warnings.
+                action = (
+                    "stop: the job was blocked before the approver ran, so there is no decision.md; "
+                    "the human reads the blocked warning and runs rework (or abandon)"
+                )
         return {"job": job, "next": action, "warnings": self.head_warnings(job)}
 
     def record_model(self, job_id, stage, model):
@@ -1222,6 +1396,20 @@ def read_skill_description():
     raise FactoryError("factory SKILL.md has no description")
 
 
+def spec_field_says_no(spec, field_line, says_no):
+    """True when the first occurrence of this impact label in the spec says "no".
+
+    Only the first labelled line counts: a later line that merely begins with the same words
+    (prose under another section) must not turn a "yes" into a skipped review.
+
+    The "no" is matched from the label's own position onward, not on the label line alone,
+    because specs also use a heading form (`## UI impact`, a blank line, then `no`) and the
+    original pattern accepted it by letting its non-word run span the newlines.
+    """
+    first = field_line.search(spec)
+    return bool(first and says_no.match(spec, first.start()))
+
+
 def first_content_line(text):
     for line in text.splitlines():
         if line.strip():
@@ -1245,18 +1433,65 @@ def check_verdict_file(text, role):
     body = text.strip().split("\n", 1)[1].strip() if "\n" in text.strip() else ""
     if verdict == "CHANGES" and not body:
         return None, "VERDICT: CHANGES needs at least one finding below the verdict line"
+    # A blocked review hands the job to a human, who needs to know what could not be assessed.
+    if verdict == "BLOCKED" and not body:
+        return None, "VERDICT: BLOCKED needs a reason below the verdict line"
+    problem = check_finding_lines(body, role)
+    if problem:
+        return None, problem
     if verdict == "CHANGES" and role in SEVERITY_GATED_ROLES:
         # Severity floor (decision SD1): a round should only be sent back to the builder
         # for a CRITICAL/HIGH finding. MEDIUM/LOW/hardening-only findings previously
         # blocked a round the same way a CRITICAL did, because only the verdict header
         # was ever checked; reviewers now report those under PASS instead.
+        # Severity may be a standalone line (the original form) or part of a FINDING line, so a
+        # reviewer following the structured format is not made to write the severity twice. Only
+        # open findings count: a closed or disputed one is not a reason to send the round back.
         severities = set(SEVERITY_LINE.findall(body))
+        severities |= {f["severity"] for f in parse_findings(body) if f["status"] == "open"}
         if not severities & BLOCKING_SEVERITIES:
             return None, (
                 "VERDICT: CHANGES requires a finding with 'SEVERITY: CRITICAL' or "
                 "'SEVERITY: HIGH'; report MEDIUM/LOW/INFO findings under VERDICT: PASS instead"
             )
     return verdict, None
+
+
+def check_finding_lines(body, role):
+    """Return a problem string when a FINDING line is malformed or names another role's id.
+
+    The role is the reviewer whose file this is. Requiring the id prefix to match it is what
+    stops one reviewer from raising or closing another's finding (decision D47).
+    """
+    declared = FINDING_PREFIX.findall(body)
+    parsed = list(FINDING_LINE.finditer(body))
+    if len(declared) != len(parsed):
+        return (
+            "a FINDING line is malformed; expected "
+            "'FINDING: <role>-<n> | SEVERITY: <level> | LOCATION: <path[:line]|none> | "
+            "STATUS: open|closed|disputed'"
+        )
+    for finding in parsed:
+        prefix = finding.group("id").rsplit("-", 1)[0]
+        if prefix != role:
+            return (
+                f"finding {finding.group('id')} belongs to '{prefix}', not '{role}'; "
+                f"a role may only raise or close findings whose id starts '{role}-'"
+            )
+    return None
+
+
+def parse_findings(text):
+    """Return the structured findings in one review file, in file order."""
+    return [
+        {
+            "id": match.group("id"),
+            "severity": match.group("severity"),
+            "location": match.group("location"),
+            "status": match.group("status"),
+        }
+        for match in FINDING_LINE.finditer(text)
+    ]
 
 
 def build_parser():

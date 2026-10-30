@@ -4,13 +4,17 @@
   import Grouped from "./components/Grouped.svelte";
   import JobViewer from "./components/JobViewer.svelte";
   import Pipeline from "./components/Pipeline.svelte";
-  import { app, jobKey, openJob, poll, startPolling, toggleTheme } from "./lib/store.svelte.js";
+  import TaskBoard from "./components/TaskBoard.svelte";
+  import TaskPanel from "./components/TaskPanel.svelte";
+  import { app, jobKey, openJob, openTask, poll, startPolling, toggleTheme } from "./lib/store.svelte.js";
 
   let viewer = $state();
   let archiveDialog = $state();
-  let archiving = $state(false);
+  // null, "archive" or "abandon": which way the open job is being closed.
+  let closing = $state(null);
 
   let job = $derived(openJob());
+  let task = $derived(openTask());
   let canArchive = $derived(job?.stage === "needs-human" && app.tab === "in-progress");
   let count = $derived(app.inProgress.length + app.archived.length);
 
@@ -29,16 +33,23 @@
   });
   $effect(() => {
     if (!archiveDialog) return;
-    if (archiving && !archiveDialog.open) archiveDialog.showModal();
-    if (!archiving && archiveDialog.open) archiveDialog.close();
+    if (closing && !archiveDialog.open) archiveDialog.showModal();
+    if (!closing && archiveDialog.open) archiveDialog.close();
   });
 
   function open(selected) {
     app.openJobKey = jobKey(selected);
   }
+  function openTaskPanel(selected) {
+    app.openTaskId = selected.id;
+  }
+  // Opening a job from a task keeps the panel where it is; the job viewer is a modal over it.
+  function closeTaskPanel() {
+    app.openTaskId = null;
+  }
   function close() {
     app.openJobKey = null;
-    archiving = false;
+    closing = null;
   }
   async function archived() {
     close();
@@ -91,12 +102,15 @@
   <button type="button" role="tab" aria-selected={app.tab === "in-progress"} class="tab-button" class:active={app.tab === "in-progress"} onclick={() => (app.tab = "in-progress")}>
     In Progress<span class="tab-count">{app.inProgress.length}</span>
   </button>
+  <button type="button" role="tab" aria-selected={app.tab === "tasks"} class="tab-button" class:active={app.tab === "tasks"} onclick={() => (app.tab = "tasks")}>
+    Tasks<span class="tab-count">{app.tasks.length}</span>
+  </button>
   <button type="button" role="tab" aria-selected={app.tab === "archive"} class="tab-button" class:active={app.tab === "archive"} onclick={() => (app.tab = "archive")}>
     Archive<span class="tab-count">{app.archived.length}</span>
   </button>
 </div>
 
-<main>
+<main class:with-panel={app.tab === "tasks" && task}>
   {#if app.connectionLost && app.loaded}
     <div class="card-warning connection-lost" role="alert">
       The factory server is not responding. Showing the last data received.
@@ -108,6 +122,17 @@
     {:else}
       <Grouped jobs={app.inProgress} onopen={open} />
     {/if}
+  {:else if app.tab === "tasks"}
+    <div class="tasks-layout">
+      <div class="tasks-main">
+        <TaskBoard onopentask={openTaskPanel} onopenjob={open} />
+      </div>
+      {#if task}
+        <aside class="task-panel" aria-label="Task details">
+          <TaskPanel {task} onclose={closeTaskPanel} onopenjob={open} />
+        </aside>
+      {/if}
+    </div>
   {:else}
     {#if app.archiveError}
       <div class="card-warning connection-lost" role="alert">The archive could not be loaded: {app.archiveError}</div>
@@ -118,12 +143,12 @@
 
 <dialog bind:this={viewer} onclose={() => { if (job) close(); }} onclick={(event) => { if (event.target === viewer) close(); }}>
   {#if job}
-    <JobViewer {job} {canArchive} onclose={close} onarchive={() => (archiving = true)} />
+    <JobViewer {job} {canArchive} onclose={close} onarchive={() => (closing = "archive")} onabandon={() => (closing = "abandon")} />
   {/if}
 </dialog>
 
-<dialog bind:this={archiveDialog} class="archive-dialog" onclose={() => (archiving = false)} onclick={(event) => { if (event.target === archiveDialog) archiving = false; }}>
-  {#if archiving && job}
-    <ArchiveDialog {job} onclose={() => (archiving = false)} ondone={archived} />
+<dialog bind:this={archiveDialog} class="archive-dialog" onclose={() => (closing = null)} onclick={(event) => { if (event.target === archiveDialog) closing = null; }}>
+  {#if closing && job}
+    <ArchiveDialog {job} mode={closing} onclose={() => (closing = null)} ondone={archived} />
   {/if}
 </dialog>

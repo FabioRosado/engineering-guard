@@ -16,7 +16,12 @@ The first line of the file must be exactly one of:
 ```
 VERDICT: PASS
 VERDICT: CHANGES
+VERDICT: BLOCKED
 ```
 
 Use `CHANGES` only for actionable findings in this change (with file:line,
 impact, and the fix you expect). Lower-severity notes may follow a `PASS`.
+
+## Findings and BLOCKED
+
+Your finding prefix is `security`. Follow `findings.md` (in this folder) for the `FINDING:` line format, id reuse across rounds, and the `BLOCKED` verdict.

@@ -433,6 +433,136 @@ def load_gate_config(root):
     return config
 
 
+def make_targets(root):
+    """Names of the targets a Makefile defines, read from its text. `make` is never run."""
+    makefile = next((root / name for name in ("Makefile", "makefile", "GNUmakefile") if (root / name).is_file()), None)
+    if makefile is None:
+        return set()
+    text = makefile.read_text(encoding="utf-8", errors="replace")
+    return set(re.findall(r"^([A-Za-z][A-Za-z0-9_-]*)\s*:(?!=)", text, re.MULTILINE))
+
+
+def npm_scripts(root):
+    path = root / "package.json"
+    if not path.is_file():
+        return set()
+    try:
+        scripts = json.loads(path.read_text(encoding="utf-8")).get("scripts", {})
+    except (ValueError, AttributeError):
+        return set()
+    return set(scripts) if isinstance(scripts, dict) else set()
+
+
+def pyproject_tools(root):
+    """Tool names that have a [tool.<name>] section in pyproject.toml."""
+    path = root / "pyproject.toml"
+    if not path.is_file():
+        return set()
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return set(re.findall(r"^\[tool\.([A-Za-z0-9_-]+)", text, re.MULTILINE))
+
+
+# For each check, the names a repository commonly gives its own entry point, best first.
+# This is an allowlist, not a filter: a target is proposed only if its name is listed, so
+# `system-test`, `deploy-*` or anything needing credentials can never be picked up by accident.
+# Only check-mode names appear under "format": a gate that ran a formatter would rewrite code
+# the reviewers never saw and hide the failure it exists to report.
+ENTRY_POINT_NAMES = {
+    "lint": ("lint", "check-lint", "lint-check"),
+    "format": ("format-check", "format:check", "check-format", "fmt-check", "format_check"),
+    "types": ("typecheck", "type-check", "types", "check-types", "mypy", "tsc"),
+    "test": ("test", "tests", "unit", "test-unit", "check-test"),
+}
+
+
+# File suffixes each directly-called, changed-file-scoped tool can read. Keeps ruff from being
+# handed package.json (see expand_changed).
+SCOPED_TOOL_SUFFIXES = {"ruff": [".py"]}
+
+
+def first_entry_point(check, available):
+    for name in ENTRY_POINT_NAMES[check]:
+        if name in available:
+            return name
+    return None
+
+
+def detect_checks(root):
+    """Propose a command for each check from what the repository itself declares.
+
+    Returns (checks, suffixes, notes). `notes` says why each command was chosen, or why a
+    check was left out, so the human reviewing the proposal can correct it. Nothing here runs a
+    command or reads an agent's work: detection only reads files, and a human commits the result.
+
+    Order of preference: the repository's own entry point (Make target, then npm script), because
+    it carries the repository's environment wrapper; then a tool configured in project files.
+    Only lint and format are scoped to changed files, since only they take a file list.
+    """
+    targets, scripts, python_tools = make_targets(root), npm_scripts(root), pyproject_tools(root)
+    checks, suffixes, notes = {}, {}, []
+
+    for check in ("lint", "format", "types", "test"):
+        target = first_entry_point(check, targets)
+        script = first_entry_point(check, scripts)
+        if target:
+            checks[check] = ["make", target]
+            notes.append(f"{check}: `make {target}` (Makefile target)")
+        elif script:
+            checks[check] = ["npm", "run", script]
+            notes.append(f"{check}: `npm run {script}` (package.json script)")
+        else:
+            raw = _tool_command(check, root, python_tools)
+            if raw:
+                checks[check], reason = raw
+                notes.append(f"{check}: {reason}")
+        if check not in checks:
+            reason = "only a mutating `format` target exists; not proposed" if (
+                check == "format" and {"format", "fmt"} & (targets | scripts)
+            ) else "nothing detected"
+            notes.append(f"{check}: not proposed ({reason})")
+
+    for check, command in checks.items():
+        # Only a tool called directly can take {changed}; make and npm cannot pass a file list through.
+        if "{changed}" in command:
+            suffixes[check] = SCOPED_TOOL_SUFFIXES[command[0]]
+    return checks, suffixes, notes
+
+
+def _tool_command(check, root, python_tools):
+    """A raw tool command for a check, only when the repository configures that tool."""
+    if "ruff" in python_tools:
+        if check == "lint":
+            return ["ruff", "check", "{changed}"], "`ruff check` on changed files ([tool.ruff] in pyproject.toml)"
+        if check == "format":
+            return ["ruff", "format", "--check", "{changed}"], "`ruff format --check` on changed files ([tool.ruff])"
+    if check == "types" and "mypy" in python_tools:
+        return ["mypy", "."], "`mypy .` ([tool.mypy] in pyproject.toml)"
+    if check == "test" and ({"pytest"} & python_tools or (root / "pytest.ini").is_file()):
+        return ["pytest", "-q"], "`pytest -q` (pytest configured)"
+    if (root / "Cargo.toml").is_file():
+        cargo = {"lint": ["cargo", "clippy", "--", "-D", "warnings"], "format": ["cargo", "fmt", "--check"],
+                 "types": ["cargo", "check"], "test": ["cargo", "test"]}
+        return cargo[check], f"`{' '.join(cargo[check])}` (Cargo.toml)"
+    if (root / "go.mod").is_file():
+        golang = {"lint": ["go", "vet", "./..."], "types": ["go", "build", "./..."], "test": ["go", "test", "./..."]}
+        if check in golang:
+            return golang[check], f"`{' '.join(golang[check])}` (go.mod)"
+    return None
+
+
+def init_gate_config(root):
+    """Write a proposed config. Never overwrites: a human-edited config is the source of truth."""
+    path = root / GATE_CONFIG_NAME
+    if path.exists():
+        raise GateError(f"{GATE_CONFIG_NAME} already exists; edit it by hand or delete it to re-detect.")
+    checks, suffixes, notes = detect_checks(root)
+    proposal = {"checks": checks}
+    if suffixes:
+        proposal["suffixes"] = suffixes
+    path.write_text(json.dumps(proposal, indent=2) + "\n", encoding="utf-8")
+    return {"written": str(path), "proposal": proposal, "notes": notes}
+
+
 def tail(text):
     return text[-OUTPUT_TAIL_CHARACTERS:]
 
@@ -467,7 +597,8 @@ def run_declared_checks(root, config, changed_files):
         command = declared.get(name)
         if not command:
             results.append({"name": name, "status": "not_configured",
-                            "message": f"No '{name}' command declared in {GATE_CONFIG_NAME}."})
+                            "message": f"No '{name}' command declared in {GATE_CONFIG_NAME}. "
+                                       f"Run `python3 {Path(__file__).resolve()} --init` to propose one."})
             continue
         if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
             raise GateError(f"{GATE_CONFIG_NAME}: checks.{name} must be a list of strings (an argv, no shell)")
@@ -494,7 +625,45 @@ def run_declared_checks(root, config, changed_files):
     return results
 
 
-def run_optional_tools(root, base, paths):
+def bandit_result(root, python_changed, added):
+    """Run bandit and report only issues on lines this change added.
+
+    bandit scans whole files, so a file the change merely touched would bring all of its
+    existing issues into the gate. Every other rule here is scoped to added lines; bandit is
+    filtered the same way so existing debt cannot fail a job (see expand_changed).
+    """
+    command = ["bandit", "-q", "-ll", "-f", "json", *python_changed]
+    completed = run(command, root, timeout=CHECK_TIMEOUT_SECONDS)
+    result = {"name": "bandit", "command": command[:3], "exitCode": completed.returncode}
+    try:
+        report = json.loads(completed.stdout)
+    except ValueError:
+        # Exit 0 with unreadable output must not read as a pass: nothing was verified.
+        result.update(status="fail", output=tail(completed.stdout + completed.stderr),
+                      message="bandit produced no readable JSON report.")
+        return result
+
+    unscanned = [entry.get("filename", "?") for entry in report.get("errors", [])]
+    if unscanned:
+        # A file bandit could not parse was not scanned, which is not the same as clean.
+        result.update(status="fail", message="bandit could not scan: " + ", ".join(unscanned),
+                      output=tail(json.dumps(report.get("errors", []), indent=2)))
+        return result
+
+    issues = []
+    for issue in report.get("results", []):
+        path = Path(issue["filename"]).as_posix().removeprefix("./")
+        added_numbers = {number for number, _ in added.get(path, [])}
+        if added_numbers.intersection(issue.get("line_range") or [issue["line_number"]]):
+            issues.append(f"{path}:{issue['line_number']} {issue['test_id']} "
+                          f"({issue['issue_severity']}/{issue['issue_confidence']}) {issue['issue_text']}")
+    result["status"] = "fail" if issues else "pass"
+    if issues:
+        result["output"] = "\n".join(issues)
+    return result
+
+
+def run_optional_tools(root, base, paths, added):
     """gitleaks and bandit when installed. A missing tool warns; it never fails the gate."""
     results = []
     python_changed = [path for path in paths if path.endswith(PYTHON_SUFFIXES) and (root / path).is_file()]
@@ -514,10 +683,7 @@ def run_optional_tools(root, base, paths):
     if not python_changed:
         results.append({"name": "bandit", "status": "not_configured", "message": "No Python files changed."})
     elif shutil.which("bandit"):
-        completed = run(["bandit", "-q", "-ll", *python_changed], root, timeout=CHECK_TIMEOUT_SECONDS)
-        results.append({"name": "bandit", "command": ["bandit", "-ll"], "exitCode": completed.returncode,
-                        "status": "pass" if completed.returncode == 0 else "fail",
-                        "output": tail(completed.stdout + completed.stderr) if completed.returncode else ""})
+        results.append(bandit_result(root, python_changed, added))
     else:
         results.append(_skipped("bandit", "Python static security analysis did not run."))
     return results
@@ -556,7 +722,7 @@ def build_report(root, base, accepted):
 
     config = load_gate_config(root)
     existing_changed = [path for path in paths if (root / path).is_file()]
-    checks = run_declared_checks(root, config, existing_changed) + run_optional_tools(root, base, paths)
+    checks = run_declared_checks(root, config, existing_changed) + run_optional_tools(root, base, paths, added)
     failed_checks = [check["name"] for check in checks if check["status"] == "fail"]
     unresolved_tamper = [entry["id"] for entry in tamper if not entry["accepted"]]
     skipped_tools = [check["name"] for check in checks if check["status"] == "skipped"]
@@ -591,6 +757,9 @@ def build_parser():
     parser.add_argument("--base", default="HEAD", help="Git ref the change is measured against (default HEAD).")
     parser.add_argument("--accepted", help="JSON file listing tamper entry ids the human accepted.")
     parser.add_argument("--output", help="Also write the JSON report to this path.")
+    parser.add_argument("--init", action="store_true",
+                        help=f"Detect the repository's lint/format/type/test commands and write a proposed "
+                             f"{GATE_CONFIG_NAME}. Review and commit it before the first job.")
     return parser
 
 
@@ -598,6 +767,9 @@ def main(argv=None):
     arguments = build_parser().parse_args(argv)
     try:
         root = repository_root(Path.cwd())
+        if arguments.init:
+            print(json.dumps(init_gate_config(root), indent=2))
+            return 0
         report = build_report(root, arguments.base, accepted_ids(arguments.accepted))
     except GateError as error:
         print(json.dumps({"schemaVersion": REPORT_SCHEMA_VERSION, "status": "error", "error": str(error)}, indent=2))

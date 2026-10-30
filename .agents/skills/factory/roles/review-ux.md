@@ -20,5 +20,9 @@ Otherwise review the user experience of the change:
 - Accessibility: keyboard reachable, labels, focus order, no color-only meaning.
 - Edge cases: long text, missing data, slow or failed requests.
 
-First line must be `VERDICT: PASS` or `VERDICT: CHANGES`. `CHANGES` needs
+First line must be `VERDICT: PASS`, `VERDICT: CHANGES` or `VERDICT: BLOCKED`. `CHANGES` needs
 concrete findings with file:line and the expected fix.
+
+## Findings and BLOCKED
+
+Your finding prefix is `ux`. Follow `findings.md` (in this folder) for the `FINDING:` line format, id reuse across rounds, and the `BLOCKED` verdict.

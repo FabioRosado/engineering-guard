@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,8 +15,8 @@ GATE_SCRIPT = PROJECT_ROOT / ".agents" / "skills" / "factory" / "scripts" / "qua
 FAKE_AWS_KEY = "AKIA" + "A" * 16
 
 
-class QualityGateTests(unittest.TestCase):
-    """Run the real gate script against disposable Git repositories."""
+class GateRepositoryCase(unittest.TestCase):
+    """A disposable Git repository and a way to run the real gate script against it."""
 
     def setUp(self):
         self.temp_directory = tempfile.TemporaryDirectory(prefix="engineering-guard-gate-")
@@ -63,6 +64,7 @@ class QualityGateTests(unittest.TestCase):
         return next(check for check in report["checks"] if check["name"] == name)
 
 
+class QualityGateTests(GateRepositoryCase):
     def test_clean_change_passes_with_exit_zero(self):
         self.write("app.py", "VALUE = 2\n")
         code, report = self.gate(path_without_tools=True)
@@ -302,6 +304,144 @@ class QualityGateTests(unittest.TestCase):
         self.write("rules.py", "# A doc that merely names noqa in a sentence is not a suppression.\nVALUE = 2\n")
         code, report = self.gate(path_without_tools=True)
         self.assertEqual(code, 0, report)
+
+
+class InitDetectionTests(GateRepositoryCase):
+    """--init proposes a config from what the repository declares; it never runs those commands."""
+
+    def init(self):
+        code, output = self.gate("--init")
+        self.assertEqual(code, 0, output)
+        return output
+
+    def written_config(self):
+        return json.loads((self.repo / ".quality-gate.json").read_text(encoding="utf-8"))
+
+    def test_make_targets_are_preferred_and_carry_the_repositorys_own_environment(self):
+        self.write("Makefile", "lint:\n\truff check .\nformat-check:\n\truff format --check .\n"
+                               "typecheck:\n\tmypy src\ntest:\n\tpytest\n")
+        self.write("pyproject.toml", "[tool.ruff]\nline-length = 100\n")
+        self.init()
+        self.assertEqual(self.written_config()["checks"], {
+            "lint": ["make", "lint"], "format": ["make", "format-check"],
+            "types": ["make", "typecheck"], "test": ["make", "test"],
+        })
+
+    def test_a_mutating_format_target_is_never_proposed(self):
+        self.write("Makefile", "lint:\n\truff check .\nformat:\n\truff format .\n")
+        output = self.init()
+        self.assertNotIn("format", self.written_config()["checks"])
+        self.assertTrue(any("mutating" in note for note in output["notes"]), output["notes"])
+
+    def test_targets_that_need_credentials_or_infrastructure_are_never_proposed(self):
+        self.write("Makefile", "system-test:\n\techo live\ndeploy-test:\n\techo deploy\nintegration-test:\n\techo x\n")
+        self.init()
+        self.assertNotIn("test", self.written_config()["checks"])
+
+    def test_the_hermetic_target_is_chosen_when_a_live_one_sits_beside_it(self):
+        self.write("Makefile", "system-test:\n\techo live\ntest:\n\techo hermetic\n")
+        self.init()
+        self.assertEqual(self.written_config()["checks"]["test"], ["make", "test"])
+
+    def test_npm_scripts_are_used_when_there_is_no_makefile(self):
+        self.write("package.json", json.dumps({"scripts": {"lint": "eslint .", "test": "jest", "format": "prettier -w ."}}))
+        self.init()
+        self.assertEqual(self.written_config()["checks"], {"lint": ["npm", "run", "lint"], "test": ["npm", "run", "test"]})
+
+    def test_configured_ruff_is_scoped_to_changed_python_files(self):
+        self.write("pyproject.toml", "[tool.ruff]\nline-length = 100\n")
+        self.init()
+        config = self.written_config()
+        self.assertEqual(config["checks"]["lint"], ["ruff", "check", "{changed}"])
+        self.assertEqual(config["checks"]["format"], ["ruff", "format", "--check", "{changed}"])
+        self.assertEqual(config["suffixes"], {"lint": [".py"], "format": [".py"]})
+
+    def test_make_targets_are_not_scoped_because_make_cannot_take_a_file_list(self):
+        self.write("Makefile", "lint:\n\truff check .\n")
+        self.init()
+        self.assertNotIn("suffixes", self.written_config())
+
+    def test_cargo_uses_check_mode_formatting(self):
+        self.write("Cargo.toml", "[package]\nname = 'x'\n")
+        self.init()
+        self.assertEqual(self.written_config()["checks"]["format"], ["cargo", "fmt", "--check"])
+
+    def test_an_existing_config_is_never_overwritten(self):
+        self.write(".quality-gate.json", '{"checks": {"lint": ["hand-written"]}}\n')
+        self.write("Makefile", "lint:\n\truff check .\n")
+        code, output = self.gate("--init")
+        self.assertEqual(code, 2)
+        self.assertIn("already exists", output["error"])
+        self.assertEqual(self.written_config(), {"checks": {"lint": ["hand-written"]}})
+
+    def test_detection_never_runs_the_repositorys_commands(self):
+        marker = self.repo / "ran.txt"
+        self.write("Makefile", f"lint:\n\ttouch {marker}\n")
+        self.init()
+        self.assertFalse(marker.exists())
+
+    def test_a_repository_with_nothing_detectable_gets_an_empty_proposal_and_says_so(self):
+        output = self.init()
+        self.assertEqual(self.written_config(), {"checks": {}})
+        self.assertEqual(len(output["notes"]), 4)
+
+    def test_the_proposed_config_is_one_the_gate_accepts_and_runs(self):
+        self.write("Makefile", "test:\n\t@echo ok\n")
+        self.init()
+        self.git("add", ".")
+        self.git("commit", "--quiet", "-m", "adopt proposed gate config")
+        self.write("app.py", "VALUE = 2\n")
+        code, report = self.gate(path_without_tools=True)
+        self.assertEqual(code, 0, report)
+        self.assertEqual(self.check(report, "test")["status"], "pass")
+
+    def test_not_configured_message_tells_the_human_how_to_fix_it(self):
+        self.write("app.py", "VALUE = 2\n")
+        _, report = self.gate(path_without_tools=True)
+        self.assertIn("--init", self.check(report, "lint")["message"])
+
+
+@unittest.skipUnless(shutil.which("bandit"), "bandit is not installed")
+class BanditScopeTests(GateRepositoryCase):
+    """bandit scans whole files; the gate must only fail on lines the change added."""
+
+    # B108 (hardcoded /tmp) is a MEDIUM issue that bandit -ll reports.
+    TEMP_PATH_LINE = 'DENIED_PATHS = ["/tmp"]\n'
+
+    def bandit_check(self):
+        _, report = self.gate()
+        return self.check(report, "bandit")
+
+    def commit_legacy_issue(self):
+        self.write("legacy.py", self.TEMP_PATH_LINE + "VALUE = 1\n")
+        self.git("add", ".")
+        self.git("commit", "--quiet", "-m", "legacy issue")
+
+    def test_an_existing_issue_in_a_touched_file_does_not_fail_the_gate(self):
+        self.commit_legacy_issue()
+        self.write("legacy.py", self.TEMP_PATH_LINE + "VALUE = 2\n")
+        bandit = self.bandit_check()
+        self.assertEqual(bandit["status"], "pass", bandit)
+
+    def test_an_issue_on_an_added_line_fails_and_the_report_says_which(self):
+        self.commit_legacy_issue()
+        self.write("legacy.py", self.TEMP_PATH_LINE + "VALUE = 1\nOTHER_PATHS = ['/tmp/x']\n")
+        bandit = self.bandit_check()
+        self.assertEqual(bandit["status"], "fail")
+        self.assertIn("legacy.py:3 B108", bandit["output"])
+        self.assertNotIn("legacy.py:1 ", bandit["output"])
+
+    def test_an_issue_in_a_new_file_fails(self):
+        self.write("fresh.py", self.TEMP_PATH_LINE)
+        bandit = self.bandit_check()
+        self.assertEqual(bandit["status"], "fail")
+        self.assertIn("fresh.py:1 B108", bandit["output"])
+
+    def test_a_file_bandit_cannot_parse_fails_rather_than_passing(self):
+        self.write("broken.py", "VALUE = (\n")
+        bandit = self.bandit_check()
+        self.assertEqual(bandit["status"], "fail")
+        self.assertIn("broken.py", bandit["message"])
 
 
 if __name__ == "__main__":

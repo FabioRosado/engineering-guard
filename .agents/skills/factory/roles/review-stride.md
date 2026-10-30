@@ -31,6 +31,7 @@ The first line of the file must be exactly one of:
 ```
 VERDICT: PASS
 VERDICT: CHANGES
+VERDICT: BLOCKED
 ```
 
 Use `CHANGES` only when the change under review introduces, or causes a
@@ -42,3 +43,7 @@ flow, gap (`file:line`), and expected mitigation — the board script
 rejects a `CHANGES` verdict that cannot cite one. Lower-severity or
 pre-existing findings belong under a `PASS` verdict, with the living
 register (not this file) as their permanent record.
+
+## Findings and BLOCKED
+
+Your finding prefix is `stride`. Follow `findings.md` (in this folder) for the `FINDING:` line format, id reuse across rounds, and the `BLOCKED` verdict.

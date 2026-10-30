@@ -620,6 +620,20 @@ class FactoryBoardTests(FactoryBoardHarness, unittest.TestCase):
         self.assertTrue(report.is_file())
         self.assertTrue((report.parent / "quality-gate.md").is_file())
 
+    def test_a_failed_check_explains_itself_in_the_readable_report(self):
+        # Declared and committed before the job starts, so the config is part of the base and
+        # is not itself reported as a loosened check.
+        failing_command = [sys.executable, "-c", "print('lint says: app.py is wrong'); raise SystemExit(1)"]
+        (self.repo / ".quality-gate.json").write_text(json.dumps({"checks": {"lint": failing_command}}), encoding="utf-8")
+        self.git("add", ".quality-gate.json")
+        self.git("commit", "--quiet", "-m", "declare a failing lint")
+        job_id = self.job_at_quality_gate()
+
+        self.factory("quality-gate-done", job_id)
+
+        report = self.repo / ".factory" / "jobs" / job_id / "round-1" / "quality-gate.md"
+        self.assertIn("lint says: app.py is wrong", report.read_text(encoding="utf-8"))
+
     def test_gate_is_not_run_during_the_build_test_review_loop(self):
         job_id = self.job_in_review()
         job_dir = self.repo / ".factory" / "jobs" / job_id

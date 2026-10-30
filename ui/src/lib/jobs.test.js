@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   STAGES,
+  canAbandon,
   gateVerdict,
   groupByRepository,
   groupByStage,
+  groupScopes,
   initialFile,
+  scopeOf,
   isWaitingOnHuman,
   orderFiles,
   reviewChips,
@@ -106,5 +109,56 @@ describe("orderFiles and initialFile", () => {
 
   it("copes with a job that has no files", () => {
     expect(initialFile([])).toBeNull();
+  });
+});
+
+describe("groupScopes", () => {
+  const files = [
+    "handover.md", "decision.md", "spec.md", "build.md", "feature.md", "prompt.md",
+    "round-10/test-audit.md", "round-2/review-code.md", "round-2/test-audit.md", "round-1/test-audit.md",
+  ];
+
+  it("puts root files in Documents and each round folder in its own scope, rounds in numeric order", () => {
+    const scopes = groupScopes(files);
+    expect(scopes.map((s) => s.label)).toEqual(["Documents", "Round 1", "Round 2", "Round 10"]);
+    expect(scopes[0].files.map((f) => f.name)).toEqual(["decision.md", "spec.md", "build.md", "feature.md", "prompt.md"]);
+  });
+
+  it("strips the round prefix from the label but keeps the full path as the file key", () => {
+    const round2 = groupScopes(files).find((s) => s.label === "Round 2");
+    expect(round2.files).toEqual([
+      { name: "round-2/review-code.md", label: "review-code.md" },
+      { name: "round-2/test-audit.md", label: "test-audit.md" },
+    ]);
+  });
+
+  it("leaves handover.md to the Overview tab", () => {
+    expect(groupScopes(files).flatMap((s) => s.files).map((f) => f.name)).not.toContain("handover.md");
+  });
+
+  it("omits Documents when a job only has round files, and copes with no files", () => {
+    expect(groupScopes(["round-1/test-audit.md"]).map((s) => s.label)).toEqual(["Round 1"]);
+    expect(groupScopes([])).toEqual([]);
+  });
+
+  it("maps a file name back to its scope", () => {
+    expect(scopeOf("round-3/review-ui.md")).toBe("scope:round-3");
+    expect(scopeOf("spec.md")).toBe("scope:documents");
+  });
+});
+
+describe("canAbandon", () => {
+  it("allows every stage a job is still moving through", () => {
+    for (const [stage] of STAGES.filter(([key]) => key !== "abandoned")) {
+      expect(canAbandon({ stage }), stage).toBe(true);
+    }
+  });
+
+  it("refuses a job that is already closed, which is also what the Archive tab holds", () => {
+    expect(canAbandon({ stage: "abandoned" })).toBe(false);
+  });
+
+  it("copes with no job", () => {
+    expect(canAbandon(null)).toBe(false);
   });
 });

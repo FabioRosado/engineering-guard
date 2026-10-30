@@ -48,9 +48,14 @@ The first line of the file must be exactly one of:
 VERDICT: PASS
 VERDICT: CHANGES
 VERDICT: N/A
+VERDICT: BLOCKED
 ```
 
 `CHANGES` requires at least one concrete, actionable finding (diagram element or spec
 section, the contradicting `file:line`, and the expected fix: correct the diagram, or correct
 the code). A difference the builder explained under "Deviations" is not a finding. Note
 low-impact or cosmetic diagram issues under `PASS` instead.
+
+## Findings and BLOCKED
+
+Your finding prefix is `architecture`. Follow `findings.md` (in this folder) for the `FINDING:` line format, id reuse across rounds, and the `BLOCKED` verdict.

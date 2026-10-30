@@ -20,10 +20,24 @@ const HUMAN_STAGES = new Set(["spec-review", "needs-human"]);
 export const REVIEWERS = ["security", "ux", "ui", "code", "architecture"];
 
 export const OVERVIEW = "overview";
+// Tabs in the job viewer that show dashboard data rather than a job file. The leading colon cannot
+// occur in a file name, so they can never collide with one.
+export const STATS = ":stats";
+export const NOTES = ":notes";
 export const HANDOVER_FILE = "handover.md";
 
 export function isWaitingOnHuman(job) {
   return HUMAN_STAGES.has(job.stage);
+}
+
+// Mirrors the board's TERMINAL_STAGES: a job in one of these is already closed, so the board
+// refuses to abandon it again.
+const CLOSED_STAGES = new Set(["abandoned"]);
+
+// Any job still moving through the pipeline can be abandoned, whether it is building, in review
+// or waiting on a human. Archived jobs (which share the closed stage) cannot.
+export function canAbandon(job) {
+  return Boolean(job) && !CLOSED_STAGES.has(job.stage);
 }
 
 export function isHumanStage(stageKey) {
@@ -79,6 +93,44 @@ const READING_ORDER = [HANDOVER_FILE, "decision.md", "spec.md", "build.md"];
 export function orderFiles(fileNames) {
   const first = READING_ORDER.filter((name) => fileNames.includes(name));
   return [...first, ...fileNames.filter((name) => !first.includes(name))];
+}
+
+// The viewer's top bar switches between scopes; the sidebar lists only the files inside the
+// current one. Root files (spec, build, decision...) form "Documents"; each round-N/ folder
+// becomes its own scope so a job with many rounds stays navigable.
+export const DOCUMENTS = "scope:documents";
+const ROUND_FILE = /^round-(\d+)\/(.+)$/;
+
+export const roundScope = (n) => `scope:round-${n}`;
+
+export function scopeOf(fileName) {
+  const match = ROUND_FILE.exec(fileName);
+  return match ? roundScope(Number(match[1])) : DOCUMENTS;
+}
+
+// Returns file scopes in display order: Documents first, then rounds numerically. Each file keeps
+// its full path as `name` (the key into job.files) and gets a short `label` for the sidebar.
+// Handover.md is excluded because the Overview tab already renders it.
+export function groupScopes(fileNames) {
+  const documents = [];
+  const rounds = new Map();
+  for (const name of orderFiles(fileNames)) {
+    if (name === HANDOVER_FILE) continue;
+    const match = ROUND_FILE.exec(name);
+    if (!match) {
+      documents.push({ name, label: name });
+      continue;
+    }
+    const n = Number(match[1]);
+    if (!rounds.has(n)) rounds.set(n, []);
+    rounds.get(n).push({ name, label: match[2] });
+  }
+  const scopes = [];
+  if (documents.length) scopes.push({ key: DOCUMENTS, label: "Documents", files: documents });
+  for (const n of [...rounds.keys()].sort((a, b) => a - b)) {
+    scopes.push({ key: roundScope(n), label: `Round ${n}`, files: rounds.get(n) });
+  }
+  return scopes;
 }
 
 // Jobs written before handover.md existed have no overview, so they open on a raw file.

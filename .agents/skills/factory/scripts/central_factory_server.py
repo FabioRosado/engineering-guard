@@ -14,6 +14,7 @@ import http.server
 import json
 import mimetypes
 import os
+import re
 import socketserver
 import sys
 import tempfile
@@ -23,7 +24,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 # Configuration
 SERVER_PORT = 5173
@@ -31,6 +32,9 @@ SERVER_HOST = "127.0.0.1"
 DATA_DIR = Path.home() / ".engineering-guard-factory"
 DATA_FILE = DATA_DIR / "data.json"
 ARCHIVE_FILE = DATA_DIR / "archive.json"
+# New dashboard data (tasks, notes, job events) lives in SQLite; jobs stay in the JSON files
+# above (decisions/factory-workspace.md, D52).
+DATABASE_FILE = DATA_DIR / "factory.db"
 ARCHIVE_RETENTION_DAYS = 30
 CLEANUP_INTERVAL_SECONDS = 3600  # Run archive cleanup every hour
 MAX_SYNC_BODY_BYTES = 5 * 1024 * 1024  # Reject oversized /api/jobs/sync payloads
@@ -65,18 +69,31 @@ def _job_key(job):
 _FACTORY_BOARD = None
 
 
+def _load_sibling_module(name):
+    """Load a module that sits next to this script, by path.
+
+    The server is run as a script and loaded by tests from a file path, so the script directory
+    is not reliably on sys.path; loading by path works the same way in both.
+    """
+    import importlib.util
+
+    path = Path(__file__).with_name(f"{name}.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_factory_board():
     """Import the sibling factory_board.py module so the server stays a thin layer."""
     global _FACTORY_BOARD
     if _FACTORY_BOARD is None:
-        import importlib.util
-
-        path = Path(__file__).with_name("factory_board.py")
-        spec = importlib.util.spec_from_file_location("factory_board", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _FACTORY_BOARD = module
+        _FACTORY_BOARD = _load_sibling_module("factory_board")
     return _FACTORY_BOARD
+
+
+# The store module is loaded once so every handler shares the same exception classes.
+factory_store = _load_sibling_module("factory_store")
 
 
 class JobServer(http.server.SimpleHTTPRequestHandler):
@@ -89,6 +106,10 @@ class JobServer(http.server.SimpleHTTPRequestHandler):
     # handlers read-modify-write the data files and would then need locking.
     timeout = 5
 
+    # Set by start_server before serving. The handler class is instantiated per request, so the
+    # one shared store lives on the class.
+    store = None
+
     def do_GET(self):
         """GET /api/jobs - return all in-progress jobs."""
         parsed_url = urlparse(self.path)
@@ -98,6 +119,12 @@ class JobServer(http.server.SimpleHTTPRequestHandler):
             self._get_jobs()
         elif path == "/api/jobs/archive":
             self._get_archive()
+        elif path == "/api/jobs/stats":
+            self._get_job_stats(parse_qs(parsed_url.query))
+        elif path == "/api/tasks":
+            self._store_call(lambda: {"tasks": self.store.list_tasks(), "statuses": list(factory_store.TASK_STATUSES)})
+        elif path == "/api/notes":
+            self._get_notes(parse_qs(parsed_url.query))
         elif path == "/health":
             self._health_check()
         else:
@@ -114,9 +141,56 @@ class JobServer(http.server.SimpleHTTPRequestHandler):
         if path == "/api/jobs/sync":
             self._sync_job()
         elif path == "/api/jobs/archive":
-            self._archive_job()
+            self._close_job("archive", default_reason="")
+        elif path == "/api/jobs/abandon":
+            self._close_job("abandon", default_reason="")
+        elif path == "/api/tasks":
+            self._with_json_object(lambda body: self._store_call(lambda: self.store.create_task(
+                title=body.get("title"), prompt=body.get("prompt", ""),
+                status=body.get("status", factory_store.DEFAULT_TASK_STATUS),
+                repo_path=body.get("repo_path"), job_id=body.get("job_id"),
+            ), success_status=201))
+        elif path == "/api/notes":
+            self._with_json_object(lambda body: self._store_call(lambda: self.store.add_note(
+                body.get("body"), task_id=body.get("task_id"),
+                repo_path=body.get("repo_path"), job_id=body.get("job_id"),
+            ), success_status=201))
+        elif (task_id := self._task_id_from(path, suffix="/move")) is not None:
+            self._with_json_object(lambda body: self._store_call(lambda: self.store.move_task(
+                task_id, status=body.get("status"), index=body.get("index"),
+            )))
         else:
             self.send_error(404, "Not found")
+
+    def do_PATCH(self):
+        """PATCH /api/tasks/<id> - change the given fields of a task."""
+        task_id = self._task_id_from(urlparse(self.path).path)
+        if task_id is None:
+            self.send_error(404, "Not found")
+            return
+        self._with_json_object(
+            lambda body: self._store_call(lambda: self.store.update_task(task_id, **body))
+        )
+
+    def do_DELETE(self):
+        """DELETE /api/tasks/<id> or /api/notes/<id>."""
+        path = urlparse(self.path).path
+        task_id = self._task_id_from(path)
+        if task_id is not None:
+            self._store_call(lambda: self.store.delete_task(task_id) or {"status": "ok"})
+            return
+        match = re.fullmatch(r"/api/notes/(\d+)", path)
+        if match:
+            note_id = int(match.group(1))
+            self._store_call(lambda: self.store.delete_note(note_id) or {"status": "ok"})
+            return
+        self.send_error(404, "Not found")
+
+    @staticmethod
+    def _task_id_from(path, suffix=""):
+        """The numeric task id in /api/tasks/<id><suffix>, or None when the path is not that route."""
+        match = re.fullmatch(r"/api/tasks/(\d+)" + re.escape(suffix), path)
+        return int(match.group(1)) if match else None
 
     def do_HEAD(self):
         """HEAD / - allow HEAD requests for liveness checks."""
@@ -245,21 +319,28 @@ class JobServer(http.server.SimpleHTTPRequestHandler):
             job["repo_path"] = payload["repo_path"]
             job["worktree_path"] = payload["worktree_path"]
 
-            # Update job in storage
+            # Events live in SQLite, not in the JSON job mirror, whose shape stays unchanged.
+            events = job.pop("events", [])
+
+            # The JSON mirror is the established contract and is written first. Events are a
+            # second, independent effect: if they cannot be stored the job update must still
+            # land (the board is never blocked, D15), so the failure is reported in the
+            # response instead of being hidden or turned into an error for the whole sync.
             _upsert_job(job)
-            
             response = {"status": "ok", "job_id": job["id"]}
+            response.update(self._store_job_events(job, events))
             self._send_json(response, status=200)
         except Exception as e:
             self.send_error(500, f"Failed to sync job: {str(e)}")
 
-    def _archive_job(self):
-        """Archive a needs-human job triggered from the dashboard.
+    def _close_job(self, action, default_reason):
+        """Archive (approved, needs-human only) or abandon (any open stage) a job from the dashboard.
 
         The repo's board.json stays the source of truth, so this delegates to
-        factory_board.py's archive command rather than editing JSON here. The
+        factory_board.py's own command rather than editing JSON here. The
         board script is imported (not spawned) and told not to push back: this
         server is single-threaded, so waiting for a sync round-trip would block.
+        Abandon requires a reason, which the board enforces. Worktree changes are left alone.
         """
         payload = self._read_json_body()
         if payload is None:
@@ -267,7 +348,7 @@ class JobServer(http.server.SimpleHTTPRequestHandler):
 
         job_id = payload.get("id")
         repo_path = payload.get("repo_path")
-        reason = (payload.get("reason") or "").strip()
+        reason = (payload.get("reason") or default_reason).strip()
         if not job_id or not repo_path:
             self._send_json({"error": "id and repo_path are required"}, status=400)
             return
@@ -284,14 +365,13 @@ class JobServer(http.server.SimpleHTTPRequestHandler):
             return
 
         try:
-            job = factory_board.Factory(Path(stored["repo_path"])).archive(
-                job_id, reason, push=False
-            )
+            factory = factory_board.Factory(Path(stored["repo_path"]))
+            job = getattr(factory, action)(job_id, reason, push=False)
         except factory_board.FactoryError as error:
             self._send_json({"error": str(error)}, status=400)
             return
         except Exception as error:
-            self._send_json({"error": f"archive failed: {error}"}, status=500)
+            self._send_json({"error": f"{action} failed: {error}"}, status=500)
             return
 
         # Keep the repository context and the mirrored file contents the dashboard
@@ -302,6 +382,64 @@ class JobServer(http.server.SimpleHTTPRequestHandler):
         job["files"] = stored.get("files", {})
         _upsert_job(job)
         self._send_json({"status": "ok", "job": job})
+
+    def _store_job_events(self, job, events):
+        """Store a job's events; return the response fields that say whether that worked."""
+        try:
+            if not isinstance(events, list):
+                raise factory_store.InvalidInput("events must be a list")
+            self.store.record_events(job["repo_path"], job["id"], events)
+            return {"events_stored": True}
+        except factory_store.InvalidInput as error:
+            return {"events_stored": False, "events_error": f"invalid events: {error}"}
+        except Exception as error:
+            print(f"[central-factory-server] cannot store events for {job['id']}: {error}", file=sys.stderr)
+            return {"events_stored": False, "events_error": f"events unavailable: {error}"}
+
+    def _with_json_object(self, action):
+        """Read the request body as a JSON object and pass it to `action`."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._send_json({"error": "request body must be a JSON object"}, status=400)
+            return
+        action(body)
+
+    def _store_call(self, operation, success_status=200):
+        """Run a store operation and map its outcome to HTTP.
+
+        Bad input is the caller's fault (400) and a missing record is 404, but a store that
+        cannot be used is a server failure (500): an outage is never presented as a client error.
+        """
+        try:
+            self._send_json(operation(), status=success_status)
+        except factory_store.InvalidInput as error:
+            self._send_json({"error": str(error)}, status=400)
+        except factory_store.NotFound as error:
+            self._send_json({"error": str(error)}, status=404)
+        except Exception as error:
+            print(f"[central-factory-server] store failure: {error}", file=sys.stderr)
+            self._send_json({"error": f"store unavailable: {error}"}, status=500)
+
+    def _get_job_stats(self, query):
+        repo_path = (query.get("repo_path") or [""])[0]
+        job_id = (query.get("id") or [""])[0]
+        if not repo_path or not job_id:
+            self._send_json({"error": "repo_path and id are required"}, status=400)
+            return
+        self._store_call(lambda: {"stats": self.store.job_stats(repo_path, job_id)})
+
+    def _get_notes(self, query):
+        task_id = (query.get("task_id") or [""])[0]
+        repo_path = (query.get("repo_path") or [""])[0]
+        job_id = (query.get("job_id") or [""])[0]
+        if task_id.isdigit():
+            self._store_call(lambda: {"notes": self.store.list_notes(task_id=int(task_id))})
+        elif repo_path and job_id:
+            self._store_call(lambda: {"notes": self.store.list_notes(repo_path=repo_path, job_id=job_id)})
+        else:
+            self._send_json({"error": "task_id, or repo_path and job_id, is required"}, status=400)
 
     def _read_json_body(self):
         try:
@@ -445,8 +583,10 @@ def _cleanup_archive():
         jobs = _load_archive()
         cutoff = datetime.now(timezone.utc).timestamp() - (ARCHIVE_RETENTION_DAYS * 86400)
 
-        # Keep only jobs completed (or created, as a fallback) after cutoff
-        kept = [j for j in jobs if _parse_timestamp(j.get("completed_at", j.get("created_at", ""))) > cutoff]
+        # Keep only jobs completed (or created, as a fallback) after cutoff. The board names the
+        # creation field `created`; reading any other name made a job without `completed_at` look
+        # infinitely old and deleted it.
+        kept = [j for j in jobs if _parse_timestamp(j.get("completed_at", j.get("created", ""))) > cutoff]
 
         if len(kept) < len(jobs):
             removed = len(jobs) - len(kept)
@@ -497,6 +637,15 @@ def start_server(host=SERVER_HOST, port=SERVER_PORT):
     # Ensure data directory exists
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    # The server owns the store: opened here, closed in the finally below. A store that cannot be
+    # opened (for example a database from a newer version) stops startup with a clear message
+    # rather than serving a dashboard whose tasks silently fail.
+    try:
+        JobServer.store = factory_store.FactoryStore(DATABASE_FILE)
+    except (factory_store.StoreError, OSError) as error:
+        print(f"Cannot open the factory database {DATABASE_FILE}: {error}", file=sys.stderr)
+        sys.exit(1)
+
     # Start cleanup thread
     cleanup_thread = threading.Thread(target=_run_cleanup_loop, daemon=True)
     cleanup_thread.start()
@@ -507,6 +656,8 @@ def start_server(host=SERVER_HOST, port=SERVER_PORT):
     try:
         httpd = socketserver.TCPServer((host, port), JobServer)
     except OSError as error:
+        # The store is already open; release it before exiting on a bind failure.
+        JobServer.store.close()
         print(
             f"Could not bind http://{host}:{port}/ ({error}). "
             "Another process may be using this port.",
@@ -514,14 +665,17 @@ def start_server(host=SERVER_HOST, port=SERVER_PORT):
         )
         sys.exit(1)
 
-    with httpd:
-        print(f"Central Factory Server listening on http://{host}:{port}/", file=sys.stderr)
-        print(f"Dashboard: http://{host}:{port}/", file=sys.stderr)
-        print(f"Data directory: {DATA_DIR}", file=sys.stderr)
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("Shutting down...", file=sys.stderr)
+    try:
+        with httpd:
+            print(f"Central Factory Server listening on http://{host}:{port}/", file=sys.stderr)
+            print(f"Dashboard: http://{host}:{port}/", file=sys.stderr)
+            print(f"Data directory: {DATA_DIR}", file=sys.stderr)
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                print("Shutting down...", file=sys.stderr)
+    finally:
+        JobServer.store.close()
 
 
 def main():
