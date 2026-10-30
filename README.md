@@ -33,7 +33,7 @@ codex plugin marketplace upgrade engineering-guard
 
 The plugin's skills are available through supported local-marketplace clients. Its lifecycle hooks are supported for plugins installed manually in Codex desktop; this repository does not claim CLI hook support. The source repository disables the user-installed plugin in `.codex/config.toml` so its existing local skills and hook run without duplicates. Other repositories need no project-local plugin registration. To remove the plugin, uninstall or disable it in the Plugins Directory, then remove the marketplace with `codex plugin marketplace remove engineering-guard`.
 
-Python 3.9 or newer runs the hook and verification tools. Node.js 18 or newer and npm run the JavaScript demonstrations. No third-party Python or npm packages are required.
+Python 3.9 or newer runs the hook and verification tools. Node.js 18 or newer and npm run the JavaScript demonstrations. No third-party Python or npm packages are required, with two optional exceptions: the factory dashboard (`ui/`, Svelte and Vite) and the factory's mermaid diagram validator, which uses `jsdom` and `mermaid` (about 180 MB installed, Node.js 20.19+, 22.13+ or 24+). Install it with `npm install --prefix .agents/skills/factory/validator`; without it the factory still works and only warns that diagrams were not syntax-checked.
 
 ## Software factory
 
@@ -44,8 +44,8 @@ feature ─► spec-writer ─► [human approve-spec] ─► builder ◄──�
              (better-prompt + research)           (implement + testing)  │
                                          test-auditor (testing) ─ CHANGES ┤
                                                       ▼ PASS             │
-                    security · ux · ui · code  ── wait for all ──────────┤ CHANGES, ≤2 rounds
-                    (security)  (checklists)  (verify)                    │
+            security · ux · ui · code · architecture ── wait for all ────┤ CHANGES, ≤2 rounds
+            (security)  (checklists)  (verify)  (proposal vs built)       │
                                    ▼ all PASS / N/A
                     approver (verify) ─► ESCALATE ─► needs-human
 ```
@@ -53,10 +53,11 @@ feature ─► spec-writer ─► [human approve-spec] ─► builder ◄──�
 Commands: `models <preset>|<expensive> <cheap>`, `<feature>`, `next`, `approve-spec <id>`, `approve <id>` (read-only branch/commit/PR suggestion), `rework <id> <note>`.
 
 - The definition lives once in `.agents/skills/factory/` (orchestrator, `roles/`, `presets.json`, dashboard). Codex and Kilo load it from `.agents/skills/`; Claude Code does not read `.agents/skills/`: from the target repo run `python3 <this checkout>/.agents/skills/factory/scripts/factory_board.py models <preset> --cli claude` and then `... install-claude`, which writes an absolute-path skill pointer to `~/.claude/skills/engineering-guard-factory/` and model-pinned `eg-*` subagents to `~/.claude/agents/`. Re-run both after changing models; the install is user-wide, so the last configured models apply in every repo.
-- `scripts/factory_board.py` inside the skill is the only writer of `board.json` and enforces the rules: verdict headers, a test audit before reviews, wait-for-all, the round limit, the human spec gate, a clean worktree at build start, and an approver that can only `ESCALATE`.
+- `scripts/factory_board.py` inside the skill is the only writer of `board.json` and enforces the rules: verdict headers, a test audit before reviews, wait-for-all, the round limit, the human spec gate, a clean worktree at build start, mermaid syntax in the job's `handover.md`, and an approver that can only `ESCALATE`.
 - Model presets (`opus-sonnet`, `sonnet-haiku`, `sol-luna`, `luna`) map an expensive and a cheap model per CLI. Preset model IDs are unverified defaults; pass explicit IDs with `models <expensive> <cheap>` if they do not resolve. A CLI that cannot pin a model per subagent runs that stage on the session model and the board records the fallback.
+- `handover.md` is an optional per-job summary with an executive summary and, only where useful, mermaid architecture, flow or sequence diagrams. The spec-writer writes it as the proposal, the builder keeps it describing what was built (`spec.md` stays frozen), and the approver finalises it; `decision.md` then only points to it. A fifth reviewer, `architecture`, compares the proposal and the diagrams with the diff, and is skipped when the spec says `Architecture impact: no` and the handover has no diagram. The board checks diagram syntax and warns when code changed but the handover did not; it cannot check that a diagram is correct, which is the reviewer's judgement. The dashboard opens a job with a handover on an Overview tab that renders it, diagrams included; a diagram that cannot be drawn shows its error and source.
 - Builder changes stay uncommitted on the current branch. The factory never commits, pushes or merges.
-- All state lives in the target repo's `.factory/`, excluded through `.git/info/exclude` so no factory files are added to that repository. View it with `python3 -m http.server 8000 --bind 127.0.0.1 -d .factory` and open `/dashboard.html`.
+- All state lives in the target repo's `.factory/`, excluded through `.git/info/exclude` so no factory files are added to that repository. View it with `npm run dashboard` from this checkout (it builds the Svelte UI on first run, then serves it with the central server at <http://localhost:5173/>). The UI needs Node.js 20.19+ or 22.12+; its packages install under `ui/` and stay out of Git.
 
 Full usage guide: [`docs/factory.md`](docs/factory.md). The design and its approval are recorded in `decisions/engineering-guard-factory.md`.
 
@@ -137,4 +138,4 @@ For work involving several dependent steps, use the client's transient task list
 
 ## Scope
 
-Engineering Guard is a local package of agent skills usable from Codex, Kilo and Claude Code, with repository-local skills, policies, hooks, scripts, and demos. It adds no dependency, server, or MCP integration. Registering the marketplace with `codex plugin marketplace add .` stores a user-level Codex source that points to this checkout; installing and trusting the plugin remain explicit desktop actions. The verification runner and demos remain repository-local.
+Engineering Guard is a local package of agent skills usable from Codex, Kilo and Claude Code, with repository-local skills, policies, hooks, scripts, and demos. Its only dependencies are the optional factory diagram validator described above; it adds no MCP integration. Registering the marketplace with `codex plugin marketplace add .` stores a user-level Codex source that points to this checkout; installing and trusting the plugin remain explicit desktop actions. The verification runner and demos remain repository-local.

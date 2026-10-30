@@ -12,8 +12,8 @@ Server listens on 127.0.0.1:5173 (local-only). Job data stored in
 import argparse
 import http.server
 import json
+import mimetypes
 import os
-import re
 import socketserver
 import sys
 import tempfile
@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import unquote, urlparse
 
 # Configuration
 SERVER_PORT = 5173
@@ -34,6 +34,10 @@ ARCHIVE_FILE = DATA_DIR / "archive.json"
 ARCHIVE_RETENTION_DAYS = 30
 CLEANUP_INTERVAL_SECONDS = 3600  # Run archive cleanup every hour
 MAX_SYNC_BODY_BYTES = 5 * 1024 * 1024  # Reject oversized /api/jobs/sync payloads
+# The built Svelte app (decision D29-D32). It is built on install, not committed, so a missing
+# directory is a normal state that the server explains rather than a failure.
+UI_DIST_DIR = Path(__file__).resolve().parents[4] / "ui" / "dist"
+UI_BUILD_HELP = "The factory UI is not built. Run: npm install --prefix ui && npm run build --prefix ui"
 
 
 def _write_json_atomic(path, data):
@@ -78,22 +82,29 @@ def _load_factory_board():
 class JobServer(http.server.SimpleHTTPRequestHandler):
     """HTTP handler for job sync and retrieval endpoints."""
 
+    # The server handles one connection at a time, and it now also serves the browser app. A
+    # browser opens speculative connections that send nothing; without a timeout one of those
+    # would block every board push and poll behind it indefinitely. A few seconds is far longer
+    # than a real request takes to arrive over loopback. Threading was not used because the
+    # handlers read-modify-write the data files and would then need locking.
+    timeout = 5
+
     def do_GET(self):
         """GET /api/jobs - return all in-progress jobs."""
         parsed_url = urlparse(self.path)
         path = parsed_url.path
-        query = parse_qs(parsed_url.query)
 
-        if path == "/":
-            self._serve_dashboard()
-        elif path == "/api/jobs":
+        if path == "/api/jobs":
             self._get_jobs()
         elif path == "/api/jobs/archive":
             self._get_archive()
         elif path == "/health":
             self._health_check()
         else:
-            self.send_error(404, "Not found")
+            # Anything that is not an API route is the built UI. The inherited
+            # SimpleHTTPRequestHandler file serving is never used: it would expose the working
+            # directory, so every static read goes through _serve_static's allowlist.
+            self._serve_static(path)
 
     def do_POST(self):
         """POST /api/jobs/sync - receive job update from a factory."""
@@ -113,24 +124,57 @@ class JobServer(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-type", "application/json")
         self.end_headers()
 
-    def _serve_dashboard(self):
-        """Serve the dashboard HTML."""
-        dashboard_path = Path(__file__).resolve().parents[1] / "assets" / "dashboard.html"
+    def _serve_static(self, request_path):
+        """Serve one file from the built UI, refusing anything that resolves outside it.
 
-        if not dashboard_path.exists():
-            self.send_error(404, "Dashboard not found")
+        The path is decoded and resolved to a real path, and that real path must sit inside the
+        UI directory. Resolving first is what defeats "..", percent-encoded "..", doubled slashes
+        and symlinks that point out of the directory; string checks on the raw path do not.
+        Only regular files are served, so a directory is never listed.
+        """
+        decoded = unquote(request_path)
+        if "\x00" in decoded or "\\" in decoded:
+            self.send_error(400, "Bad path")
             return
-
+        relative = decoded.lstrip("/") or "index.html"
+        ui_root = UI_DIST_DIR.resolve()
         try:
-            with open(dashboard_path, "rb") as f:
-                content = f.read()
-            self.send_response(200)
-            self.send_header("Content-type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(content)))
-            self.end_headers()
-            self.wfile.write(content)
-        except Exception as e:
-            self.send_error(500, str(e))
+            target = (ui_root / relative).resolve()
+        except (OSError, RuntimeError):
+            self.send_error(400, "Bad path")
+            return
+        if target != ui_root and ui_root not in target.parents:
+            self.send_error(404, "Not found")
+            return
+        if not target.is_file():
+            # A missing index means the UI was never built; any other miss is an ordinary 404.
+            # Falling back to index.html for unknown paths would hide a broken build.
+            if relative == "index.html":
+                self._send_text(503, UI_BUILD_HELP)
+            else:
+                self.send_error(404, "Not found")
+            return
+        try:
+            content = target.read_bytes()
+        except OSError as error:
+            self.send_error(500, f"Cannot read file: {error}")
+            return
+        content_type, _ = mimetypes.guess_type(target.name)
+        self.send_response(200)
+        self.send_header("Content-Type", content_type or "application/octet-stream")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def _send_text(self, status, message):
+        body = message.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _get_jobs(self):
         """Return all in-progress jobs as JSON."""

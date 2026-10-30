@@ -4,41 +4,44 @@ The orchestrator (whichever agent session runs the factory skill) calls this scr
 instead of editing board.json by hand. Every command validates the job files the
 agents were expected to write, so the loop rules live in one tested place:
 
-  spec -> spec-review -(human approve-spec)-> build -> test-audit -> review -> build ... -> approver -> needs-human
+  spec -> spec-review -(human approve-spec)-> build -> test-audit -> review -> build ...
+       -> stride-review -> quality-gate -> approver -> needs-human
 
 Run from anywhere inside the target Git repository. Output is JSON on stdout; a
 rule violation exits 2 with {"error": ...} so the orchestrator can react.
 """
 
 import argparse
+import hashlib
+import http.client
 import json
 import os
 import re
-import socket
+import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.request
-import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
+QUALITY_GATE_SCRIPT = SKILL_ROOT / "scripts" / "quality_gate.py"
 PRESETS_FILE = SKILL_ROOT / "presets.json"
-DASHBOARD_TEMPLATE = SKILL_ROOT / "assets" / "dashboard.html"
 ROLES_DIRECTORY = SKILL_ROOT / "roles"
 
 FACTORY_DIRECTORY_NAME = ".factory"
-REVIEWERS = ("security", "ux", "ui", "code")
-# Only UX and UI can be "not applicable": every change has code and a security surface,
-# so N/A from those reviewers would let a round pass with nothing reviewed.
+REVIEWERS = ("security", "ux", "ui", "code", "architecture")
+# Only UX, UI and architecture can be "not applicable": every change has code and a security
+# surface, so N/A from those reviewers would let a round pass with nothing reviewed. A small
+# fix has no architecture to compare, so architecture may be N/A (decision D36).
 ALLOWED_VERDICTS = {
     "tests": ("PASS", "CHANGES"),
     "security": ("PASS", "CHANGES"),
     "code": ("PASS", "CHANGES"),
     "ux": ("PASS", "CHANGES", "N/A"),
     "ui": ("PASS", "CHANGES", "N/A"),
+    "architecture": ("PASS", "CHANGES", "N/A"),
     "stride": ("PASS", "CHANGES"),
 }
 # Roles whose CHANGES verdict must cite at least one CRITICAL/HIGH finding (decision
@@ -53,9 +56,24 @@ BLOCKING_SEVERITIES = {"CRITICAL", "HIGH"}
 # moves on and the approver escalates with whatever findings remain.
 REVIEW_ROUNDS_PER_ATTEMPT = 2
 TEST_REBUILDS_PER_ATTEMPT = 1
+# The quality gate runs once per job after STRIDE (decision D27) to keep the build/test loop
+# short. Fixable findings get this many extra build rounds before the job moves on to the
+# approver with the remainder carried as warnings (decision D28).
+GATE_FIXES_PER_ATTEMPT = 1
 SPEC_STATUS_LINE = re.compile(r"^\*\*Status:\*\*.*$", re.MULTILINE)
 # Anchored to the spec's own field line so a quoted draft or prose mention does not match.
 UI_IMPACT_NO = re.compile(r"^\W*UI impact\W*no\b", re.IGNORECASE | re.MULTILINE)
+ARCHITECTURE_IMPACT_NO = re.compile(r"^\W*Architecture impact\W*no\b", re.IGNORECASE | re.MULTILINE)
+# The handover is the living, builder-updated home of the diagrams: spec.md is frozen once
+# approved, so it cannot track a build that changes shape (decision D33).
+HANDOVER_FILE = "handover.md"
+# Deliberately loose: it only decides whether a handover MIGHT hold a diagram, so a false positive
+# costs one validator run and a false negative would skip validation. What actually counts as a
+# diagram is decided by the validator, which uses the same markdown lexer as the dashboard; a strict
+# pattern here once disagreed with it on ~~~ fences, "Mermaid", longer fences and fences in quotes.
+MAYBE_DIAGRAM = re.compile(r"(```|~~~)[^\n]*mermaid", re.IGNORECASE)
+DIAGRAM_VALIDATOR = SKILL_ROOT / "validator" / "check_mermaid.mjs"
+DIAGRAM_VALIDATOR_TIMEOUT_SECONDS = 120
 # Files whose change can affect what a user sees; any of them keeps the UI review on.
 USER_FACING_SUFFIXES = (
     ".html", ".htm", ".css", ".scss", ".sass", ".less", ".js", ".jsx", ".ts", ".tsx",
@@ -68,7 +86,7 @@ DECISION_HEADER = re.compile(r"^ESCALATE\b")
 TERMINAL_STAGES = ("abandoned",)
 # Full ordered pipeline, including human-gate and terminal stages, for display
 # surfaces (dashboards) that need every stage rather than just ACTIVE_STAGES.
-# Keep in sync with dashboard.html's STAGES array and HUMAN_STAGES set, and with
+# Keep in sync with ui/src/lib/jobs.js's STAGES array and HUMAN_STAGES set, and with
 # decisions/central-factory-dashboard.md's documented column order — this is the
 # single Python source those lists are derived from.
 PIPELINE_STAGES = (
@@ -78,6 +96,7 @@ PIPELINE_STAGES = (
     ("test-audit", "Test Audit"),
     ("review", "Review"),
     ("stride-review", "STRIDE"),
+    ("quality-gate", "Quality Gate"),
     ("approver", "Approver"),
     ("needs-human", "Needs Human"),
     ("abandoned", "Abandoned"),
@@ -92,10 +111,13 @@ STAGE_TIERS = {
     "ux": "cheap",
     "ui": "cheap",
     "code": "cheap",
+    # Comparing a proposed architecture with the built one is structural reasoning, which
+    # cheap models do poorly, so this reviewer runs on the expensive tier.
+    "architecture": "expensive",
     "stride": "expensive",
     "approver": "expensive",
 }
-ACTIVE_STAGES = ("build", "test-audit", "review", "stride-review", "approver")
+ACTIVE_STAGES = ("build", "test-audit", "review", "stride-review", "quality-gate", "approver")
 # Only the builder changes the implementation; every other role writes just its report.
 EDITING_ROLES = {"builder"}
 ROLE_STAGES = {
@@ -106,11 +128,13 @@ ROLE_STAGES = {
     "review-ux": "ux",
     "review-ui": "ui",
     "review-code": "code",
+    "review-architecture": "architecture",
     "review-stride": "stride",
     "approver": "approver",
 }
 # Bind to loopback: specs and security reviews can describe unfixed vulnerabilities.
-DASHBOARD_COMMAND = "python3 -m http.server 8000 --bind 127.0.0.1 -d .factory"
+# The dashboard is the central server's Svelte app (decision D31); there is no per-repository mode.
+DASHBOARD_COMMAND = "npm run dashboard"
 BACKLOG_TEMPLATE = """# Factory backlog
 
 One feature per line. `next` takes the first unchecked item.
@@ -121,7 +145,7 @@ One feature per line. `next` takes the first unchecked item.
 # Central factory server configuration
 CENTRAL_FACTORY_HOST = "127.0.0.1"
 CENTRAL_FACTORY_PORT = 5173
-CENTRAL_FACTORY_SYNC_URL = f"http://{CENTRAL_FACTORY_HOST}:{CENTRAL_FACTORY_PORT}/api/jobs/sync"
+CENTRAL_FACTORY_SYNC_PATH = "/api/jobs/sync"
 CENTRAL_FACTORY_PUSH_TIMEOUT = 2  # seconds
 
 
@@ -153,7 +177,7 @@ def _push_to_central_server(board, job, repository_root):
     """Push job state to central factory server (non-blocking).
     
     Collects all markdown files from the job directory and sends them to the
-    central server at CENTRAL_FACTORY_SYNC_URL. Network failures are logged but
+    central server at CENTRAL_FACTORY_SYNC_PATH. Network failures are logged but
     do not block factory progress (best-effort notification).
     """
     if os.environ.get("FACTORY_DISABLE_CENTRAL_SYNC"):
@@ -174,24 +198,27 @@ def _push_to_central_server(board, job, repository_root):
             },
         }
         
-        # Send POST request with timeout
         body = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            CENTRAL_FACTORY_SYNC_URL,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        # http.client only speaks HTTP, so the push cannot be redirected to a file: or other
+        # scheme the way urllib.request.urlopen could; the host and port are fixed constants.
+        connection = http.client.HTTPConnection(
+            CENTRAL_FACTORY_HOST, CENTRAL_FACTORY_PORT, timeout=CENTRAL_FACTORY_PUSH_TIMEOUT
         )
-        
         try:
-            with urllib.request.urlopen(request, timeout=CENTRAL_FACTORY_PUSH_TIMEOUT) as response:
-                if response.status == 200:
-                    print(f"Central server: synced job {job['id']}", file=sys.stderr)
-                else:
-                    print(f"Central server: sync returned {response.status}", file=sys.stderr)
-        except (urllib.error.URLError, socket.timeout) as e:
-            # Non-blocking: central server unavailable or unreachable
+            connection.request(
+                "POST", CENTRAL_FACTORY_SYNC_PATH, body=body, headers={"Content-Type": "application/json"}
+            )
+            response = connection.getresponse()
+            response.read()
+            if response.status == 200:
+                print(f"Central server: synced job {job['id']}", file=sys.stderr)
+            else:
+                print(f"Central server: sync returned {response.status}", file=sys.stderr)
+        except (OSError, http.client.HTTPException) as e:
+            # Non-blocking: central server unavailable or unreachable (socket.timeout is an OSError)
             print(f"Central server: push failed (will continue): {type(e).__name__}", file=sys.stderr)
+        finally:
+            connection.close()
     except Exception as e:
         # Catch any unexpected errors and log without blocking
         print(f"Central server: push error (will continue): {e}", file=sys.stderr)
@@ -240,9 +267,11 @@ class Factory:
             self.write_json(self.board_path, {"jobs": []})
         if not self.backlog_path.exists():
             self.backlog_path.write_text(BACKLOG_TEMPLATE, encoding="utf-8")
-        # Always refresh the dashboard so skill upgrades reach existing factories.
-        dashboard = self.directory / "dashboard.html"
-        dashboard.write_text(DASHBOARD_TEMPLATE.read_text(encoding="utf-8"), encoding="utf-8")
+        # init, models and new pass through here, and `new` is how every run starts, so a config
+        # written before a stage existed is repaired before the orchestrator reads its models,
+        # on any CLI, not only when install-claude runs.
+        if self.config_path.exists():
+            self.backfill_missing_stages(json.loads(self.config_path.read_text(encoding="utf-8")))
 
         git_directory = Path(run_git(self.repository_root, "rev-parse", "--git-common-dir").strip())
         if not git_directory.is_absolute():
@@ -277,6 +306,10 @@ class Factory:
                 job.setdefault("attempt", new_attempt())
                 # Jobs created before the stride-review stage have no field for it yet.
                 job.setdefault("stride", None)
+                # Jobs created before the quality gate have no gate state yet.
+                job.setdefault("quality_gate", None)
+                job.setdefault("accepted_tamper", {})
+                job["attempt"].setdefault("gate_fixes", 0)
                 return job
         raise FactoryError(f"unknown job {job_id}")
 
@@ -391,6 +424,81 @@ class Factory:
             return [f"HEAD moved since build started (base {job['base'][:12]}); review diffs may be incomplete"]
         return []
 
+    def check_diagrams(self, job_id):
+        """Return (error, warning) for the mermaid blocks in the job's handover.
+
+        An invalid diagram is a rule violation the orchestrator must send back to the
+        agent. A validator that cannot run (no Node, packages not installed, unsupported
+        Node) is only a warning: the factory must keep working on machines that never
+        installed the optional packages (decision D37). A handover with no hint of a
+        diagram never reaches the validator, so it needs nothing installed.
+        """
+        handover = self.job_directory(job_id) / HANDOVER_FILE
+        if not handover.is_file():
+            return None, None
+        if not MAYBE_DIAGRAM.search(handover.read_text(encoding="utf-8")):
+            return None, None
+        node = shutil.which("node")
+        if node is None:
+            return None, f"{HANDOVER_FILE} diagrams were not validated: node is not installed"
+        try:
+            result = subprocess.run(
+                [node, str(DIAGRAM_VALIDATOR), str(handover)],
+                capture_output=True, text=True, timeout=DIAGRAM_VALIDATOR_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return None, f"{HANDOVER_FILE} diagrams were not validated: the validator timed out"
+        try:
+            report = json.loads(result.stdout)
+        except ValueError:
+            # Not JSON means the script itself broke (for example an old Node that cannot
+            # parse it), which is an unavailable validator, not evidence about the diagrams.
+            detail = (result.stderr.strip().splitlines() or ["no output"])[-1]
+            return None, f"{HANDOVER_FILE} diagrams were not validated: validator failed ({detail})"
+        if "unavailable" in report:
+            return None, f"{HANDOVER_FILE} diagrams were not validated: {report['unavailable']}"
+        broken = [diagram for diagram in report["diagrams"] if not diagram["valid"]]
+        if not broken:
+            return None, None
+        details = "; ".join(
+            f"diagram {diagram['index']} (line {diagram['line']}): {diagram['error'].splitlines()[0]}"
+            for diagram in broken
+        )
+        return f"{HANDOVER_FILE} has {len(broken)} invalid mermaid diagram(s): {details}", None
+
+    def require_valid_diagrams(self, job_id):
+        """Raise on an invalid diagram; return a warning when validation was not possible."""
+        error, warning = self.check_diagrams(job_id)
+        if error:
+            raise FactoryError(error)
+        return warning
+
+    def handover_fingerprint(self, job_id):
+        handover = self.job_directory(job_id) / HANDOVER_FILE
+        if not handover.is_file():
+            return None
+        return hashlib.sha256(handover.read_bytes()).hexdigest()
+
+    def stale_handover_warning(self, job, changed_files):
+        """Warn when code moved on a later round but the handover did not.
+
+        This is a staleness signal, not a claim that the diagrams are right or wrong: the
+        board cannot judge content. It compares the handover's fingerprint with the one
+        recorded after the previous build, so a builder that never touched it is caught
+        even though the file still exists and still parses.
+        """
+        fingerprint = self.handover_fingerprint(job["id"])
+        previous = job.get("handover_fingerprint")
+        job["handover_fingerprint"] = fingerprint
+        if fingerprint is None or previous is None or fingerprint != previous:
+            return None
+        if not changed_files:
+            return None
+        return (
+            f"{HANDOVER_FILE} was not updated in round {job['round']} although code changed; "
+            "its diagrams may no longer match the implementation"
+        )
+
     # ----- commands -----------------------------------------------------
 
     def init(self):
@@ -428,6 +536,26 @@ class Factory:
         self.write_json(self.config_path, config)
         return config
 
+    def backfill_missing_stages(self, config):
+        """Add stages introduced after this config was written, using the tier models it already holds.
+
+        `models` is the only writer of `stages`, so a config from before a new stage (for example
+        architecture) lacks that key. Re-running `models` is not required for an upgrade: the stage's
+        tier says which of the user's two chosen models it should use. The file is rewritten so the
+        orchestrator, which reads `stages.<stage>` from it, sees the same value.
+        """
+        stages = config.setdefault("stages", {})
+        missing = [stage for stage in STAGE_TIERS if stage not in stages]
+        if not missing:
+            return config
+        for stage in missing:
+            tier = STAGE_TIERS[stage]
+            if tier not in config:
+                raise FactoryError(f"model config has no '{tier}' model; run `models <preset>` again")
+            stages[stage] = config[tier]
+        self.write_json(self.config_path, config)
+        return config
+
     def new(self, title, from_backlog):
         self.ensure_initialized()
         if from_backlog:
@@ -449,6 +577,8 @@ class Factory:
             "test_audit": None,
             "reviews": {},
             "stride": None,
+            "quality_gate": None,
+            "accepted_tamper": {},
             "history": [],
             "models": {},
             "warnings": [],
@@ -477,6 +607,9 @@ class Factory:
         self.require_file(job_id, "feature.md")
         self.require_file(job_id, "prompt.md")
         self.require_file(job_id, "spec.md")
+        # Validated before the stage moves, so a broken proposal diagram never reaches the human.
+        diagram_warning = self.require_valid_diagrams(job_id)
+        job["warnings"] = [diagram_warning] if diagram_warning else []
         job["stage"] = "spec-review"
         self.save(board, job)
         return job
@@ -545,6 +678,9 @@ class Factory:
         first_line = first_content_line(build_report.read_text(encoding="utf-8"))
         if BLOCKED_HEADER.match(first_line):
             job["stage"] = "needs-human"
+            # "fixing" describes a gate-fix round that has now ended without reaching the gate;
+            # leaving it would send the next build straight back to the gate (see rework).
+            job["quality_gate"] = None
             job["warnings"] = self.head_warnings(job) + [f"builder blocked in round {job['round']}: {first_line}"]
             self.save(board, job)
             return job
@@ -553,18 +689,31 @@ class Factory:
                 "builder produced no changes since the base commit; re-spawn the builder, "
                 "or have it start build.md with BLOCKED: <reason> if it cannot proceed"
             )
+        # Validated before the snapshot and stage change: an invalid diagram sends the job back
+        # to the builder to fix, with nothing recorded for this round.
+        diagram_warning = self.require_valid_diagrams(job_id)
         job["changed_files"] = self.write_change_snapshot(job)
+        job["warnings"] = self.head_warnings(job)
+        for message in (diagram_warning, self.stale_handover_warning(job, job["changed_files"])):
+            if message:
+                job["warnings"].append(message)
+        if job["quality_gate"] == "fixing":
+            # A gate-fix round only repairs what the gate reported, so it returns to the gate
+            # instead of repeating tests and reviews (decision D27). The reviews therefore
+            # predate this edit; the approver is told so through the job's gate_fix_rounds.
+            job["stage"] = "quality-gate"
+            self.save(board, job)
+            return job
         job["stage"] = "test-audit"
         job["test_audit"] = "pending"
         job["reviews"] = {}
-        job["warnings"] = self.head_warnings(job)
         self.save(board, job)
         return job
 
     def test_audit_done(self, job_id):
         """Gate the reviewers on test quality (decision D11).
 
-        Weak tests are cheaper to fix before four reviewers spend a round on them,
+        Weak tests are cheaper to fix before five reviewers spend a round on them,
         so CHANGES sends the job straight back to the builder. Those rebuilds have
         their own small budget so they never consume the review rounds; once it is
         spent the reviewers still run and the unresolved audit is carried as a
@@ -603,30 +752,49 @@ class Factory:
         }
 
     def write_automatic_not_applicable_reviews(self, job):
-        """Skip the UI agent when it could only answer N/A (decision D5).
+        """Skip reviewers that could only answer N/A and return their names.
 
-        Both conditions the UI role uses must hold: the approved spec says
-        `UI impact: no` and no changed file can affect what a user sees. UX is
+        UI (decision D5): both conditions the UI role uses must hold: the approved spec
+        says `UI impact: no` and no changed file can affect what a user sees. UX is
         never skipped: CLI output and messages in any source file are UX, and file
         extensions cannot detect that.
+
+        Architecture (decision D36): the spec says `Architecture impact: no` and the
+        handover holds no diagram. Requiring both ties the skip to evidence, so a builder
+        that drew a diagram anyway still gets it reviewed.
+
+        Each skip is decided on its own; one reviewer staying on must not keep another on.
         """
         spec = self.require_file(job["id"], "spec.md").read_text(encoding="utf-8")
-        if not UI_IMPACT_NO.search(spec):
-            return []
+        round_directory = self.job_directory(job["id"]) / f"round-{job['round']}"
+        skipped = []
+
         user_facing = [
             path for path in job.get("changed_files", [])
             if path.lower().endswith(USER_FACING_SUFFIXES)
         ]
-        if user_facing:
-            return []
-        round_directory = self.job_directory(job["id"]) / f"round-{job['round']}"
-        (round_directory / "review-ui.md").write_text(
-            "VERDICT: N/A\n"
-            "Written by factory_board.py: the spec says `UI impact: no` and no changed "
-            "file is visual (see files.txt).\n",
-            encoding="utf-8",
-        )
-        return ["ui"]
+        if UI_IMPACT_NO.search(spec) and not user_facing:
+            (round_directory / "review-ui.md").write_text(
+                "VERDICT: N/A\n"
+                "Written by factory_board.py: the spec says `UI impact: no` and no changed "
+                "file is visual (see files.txt).\n",
+                encoding="utf-8",
+            )
+            skipped.append("ui")
+
+        handover = self.job_directory(job["id"]) / HANDOVER_FILE
+        # Skipping a review on a wrong "no diagram" would hide a change, so anything that might be a
+        # diagram keeps the reviewer on; only a handover with no hint of one is skipped.
+        has_diagram = handover.is_file() and MAYBE_DIAGRAM.search(handover.read_text(encoding="utf-8"))
+        if ARCHITECTURE_IMPACT_NO.search(spec) and not has_diagram:
+            (round_directory / "review-architecture.md").write_text(
+                "VERDICT: N/A\n"
+                "Written by factory_board.py: the spec says `Architecture impact: no` and "
+                f"{HANDOVER_FILE} contains no diagram.\n",
+                encoding="utf-8",
+            )
+            skipped.append("architecture")
+        return skipped
 
     def read_reviews(self, job):
         round_directory = self.job_directory(job["id"]) / f"round-{job['round']}"
@@ -635,8 +803,22 @@ class Factory:
         for reviewer in REVIEWERS:
             path = round_directory / f"review-{reviewer}.md"
             if not path.is_file():
-                reviews[reviewer] = "pending"
-                continue
+                # A job that entered review before the architecture reviewer existed never had
+                # it spawned, so waiting on it would strand the job. New jobs always record all
+                # reviewers in test_audit_done, so a missing key identifies the older job.
+                # The N/A is written as a file rather than only returned: round-status saves the
+                # verdict into the job, which would add the key and make the next (documented as
+                # repeatable) call read the missing file as pending again.
+                if reviewer == "architecture" and reviewer not in job.get("reviews", {}):
+                    path.write_text(
+                        "VERDICT: N/A\n"
+                        "Written by factory_board.py: this round started before the architecture "
+                        "reviewer existed, so none was spawned.\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    reviews[reviewer] = "pending"
+                    continue
             verdict, problem = check_verdict_file(path.read_text(encoding="utf-8"), reviewer)
             if problem:
                 reviews[reviewer] = "invalid"
@@ -702,12 +884,12 @@ class Factory:
     def stride_review_done(self, job_id):
         """Whole-repo STRIDE sweep, gating the approver (decisions SD5-SD7).
 
-        Unlike security/ux/ui/code, STRIDE evaluates the job's full accumulated diff
+        Unlike security/ux/ui/code/architecture, STRIDE evaluates the job's full accumulated diff
         against a persisted, whole-repo trust-zone profile rather than one round's
         diff, so it runs once per job here rather than once per review round. A
         CHANGES verdict (a new or newly-confirmed CRITICAL/HIGH threat touching the
         changed component) sends the job back to the builder and consumes the same
-        review-round budget as the other four reviewers, so the two mechanisms
+        review-round budget as the other five reviewers, so the two mechanisms
         cannot together exceed the attempt's total review-round allowance.
         """
         board = self.load_board()
@@ -731,9 +913,133 @@ class Factory:
         if verdict == "CHANGES":
             job["warnings"].append(f"STRIDE review still requests changes after round {job['round']}")
         job["history"].append({"round": job["round"], "stride": verdict})
+        job["stage"] = "quality-gate"
+        job["quality_gate"] = "pending"
+        self.save(board, job)
+        return {"job": job, "next": "quality-gate"}
+
+    def quality_gate_done(self, job_id):
+        """Run the deterministic quality gate itself (decisions D27, D28).
+
+        The board runs the script, not an agent, so the gate cannot be skipped or
+        have its result rewritten by an LLM. Outcomes:
+          - pass or warn: on to the approver;
+          - fixable findings and a fix round left: back to the builder once;
+          - fixable findings and no round left: on to the approver, findings carried
+            as warnings so the human sees them;
+          - unresolved tamper entries: never sent to the builder (only the human can
+            accept a loosened check), carried to the approver for the human.
+        """
+        board = self.load_board()
+        job = self.find_job(board, job_id)
+        self.require_stage(job, "quality-gate")
+        report = self.run_quality_gate(job)
+        job["warnings"] = self.head_warnings(job)
+        summary = report["summary"]
+        fixable = bool(report["findings"] or summary["failedChecks"])
+        job["quality_gate"] = report["status"]
+        job["history"].append({"round": job["round"], "quality_gate": report["status"]})
+        for message in self.gate_warnings(report):
+            job["warnings"].append(message)
+
+        attempt = job["attempt"]
+        if fixable and attempt["gate_fixes"] < GATE_FIXES_PER_ATTEMPT:
+            attempt["gate_fixes"] += 1
+            job["gate_fix_rounds"] = job.get("gate_fix_rounds", 0) + 1
+            job["round"] += 1
+            job["quality_gate"] = "fixing"
+            job["stage"] = "build"
+            self.save(board, job)
+            return {"job": job, "next": "rebuild", "report": report}
+
+        if fixable:
+            job["warnings"].append("quality gate still reports findings after the gate-fix round")
+        if summary["unresolvedTamper"]:
+            job["warnings"].append(
+                "quality gate: loosened checks need your decision: "
+                f"{len(summary['unresolvedTamper'])} unresolved tamper entries (accept-suppression)"
+            )
         job["stage"] = "approver"
         self.save(board, job)
-        return {"job": job, "next": "approver"}
+        return {"job": job, "next": "approver", "report": report}
+
+    def run_quality_gate(self, job):
+        """Run quality_gate.py against the job's base and keep the report with the round."""
+        round_directory = self.job_directory(job["id"]) / f"round-{job['round']}"
+        round_directory.mkdir(exist_ok=True)
+        report_path = round_directory / "quality-gate.json"
+        accepted_path = round_directory / ".accepted-tamper.json"
+        accepted_path.write_text(json.dumps(sorted(job["accepted_tamper"])), encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(QUALITY_GATE_SCRIPT), "--base", job["base"],
+             "--accepted", str(accepted_path), "--output", str(report_path)],
+            cwd=self.repository_root, capture_output=True, text=True,
+        )
+        accepted_path.unlink(missing_ok=True)
+        try:
+            report = json.loads(result.stdout)
+        except ValueError as error:
+            raise FactoryError(f"quality gate produced no report: {result.stderr.strip() or error}") from error
+        if report.get("status") == "error":
+            # A broken gate must stop the job: treating it as a pass would hide every finding.
+            raise FactoryError(f"quality gate could not run: {report.get('error')}")
+        self.write_gate_markdown(job, report, round_directory)
+        return report
+
+    @staticmethod
+    def gate_warnings(report):
+        messages = []
+        for tool in report["summary"]["skippedTools"]:
+            messages.append(f"quality gate: {tool} did not run (not installed); see round report for the install hint")
+        if report["summary"]["warnings"]:
+            messages.append(f"quality gate: {report['summary']['warnings']} naming warning(s) to address in build.md")
+        return messages
+
+    def write_gate_markdown(self, job, report, round_directory):
+        """A readable copy of the report, so it appears in the dashboard and to the next builder."""
+        lines = [f"# Quality gate: {report['status']}", ""]
+        for title, entries in (("Findings (must be fixed)", report["findings"]),
+                               ("Warnings (address each in build.md)", report["warnings"])):
+            lines.append(f"## {title}")
+            lines += [f"- `{e['id']}` {e['file']}:{e['line']} {e['rule']}: {e['message']}" for e in entries] or ["None"]
+            lines.append("")
+        lines.append("## Tamper (loosened checks; only the human can accept these)")
+        lines += [
+            f"- `{e['id']}` {e['file']}:{e['line']} {e['rule']}: {e['message']}"
+            f" [{'accepted' if e['accepted'] else 'UNRESOLVED'}]"
+            for e in report["tamper"]
+        ] or ["None"]
+        lines += ["", "## Checks"]
+        lines += [f"- {c['name']}: {c['status']}" + (f" ({c['message']})" if c.get("message") else "")
+                  for c in report["checks"]]
+        (round_directory / "quality-gate.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def accept_suppression(self, job_id, entry_id, reason):
+        """Record the human's acceptance of one loosened check (decision D24).
+
+        Only the human runs this; the orchestrator instructions forbid agents from it,
+        as with approve-spec. The board cannot tell who ran it, so that rule is
+        enforced by instruction, which the decision record lists as a known limit.
+        """
+        if not reason.strip():
+            raise FactoryError("accept-suppression needs a reason")
+        board = self.load_board()
+        job = self.find_job(board, job_id)
+        known = self.known_tamper_ids(job)
+        if entry_id not in known:
+            raise FactoryError(f"unknown tamper entry {entry_id}; known: {sorted(known)}")
+        job["accepted_tamper"][entry_id] = {"reason": reason.strip(), "accepted_at": utc_now()}
+        self.save(board, job)
+        return job
+
+    def known_tamper_ids(self, job):
+        ids = set()
+        for report_path in (self.job_directory(job["id"])).glob("round-*/quality-gate.json"):
+            try:
+                ids |= {entry["id"] for entry in json.loads(report_path.read_text(encoding="utf-8"))["tamper"]}
+            except (ValueError, KeyError):
+                continue
+        return ids
 
     def decision(self, job_id):
         """Humans give final approval, so the only accepted decision is ESCALATE."""
@@ -746,6 +1052,10 @@ class Factory:
             raise FactoryError(
                 "decision.md must start with ESCALATE; the factory never approves on its own"
             )
+        # The approver finalises the handover, so it is checked once more before the human reads it.
+        diagram_warning = self.require_valid_diagrams(job_id)
+        if diagram_warning:
+            job["warnings"].append(diagram_warning)
         job["stage"] = "needs-human"
         self.save(board, job)
         return job
@@ -762,6 +1072,11 @@ class Factory:
         self.mark_spec_approved(job_id)
         job["round"] += 1
         job["attempt"] = new_attempt()
+        # A rework is new implementation work and must go back through tests and reviews, so it
+        # must never inherit the gate-fix shortcut build_done takes while quality_gate is "fixing".
+        # Today only a BLOCKED gate-fix build can reach needs-human in that state and it clears the
+        # flag itself; this keeps the invariant at the point where it matters, whatever route led here.
+        job["quality_gate"] = None
         note_path = self.job_directory(job_id) / f"rework-{job['round']}.md"
         note_path.write_text(f"# Human rework note (before round {job['round']})\n\n{note.strip()}\n", encoding="utf-8")
         job["stage"] = "build"
@@ -826,6 +1141,7 @@ class Factory:
                 "build": f"spawn a fresh builder for round {job['round']}, then build-done",
                 "test-audit": f"spawn test-auditor for {round_folder}, then test-audit-done",
                 "stride-review": f"spawn the stride reviewer for {round_folder}, then stride-review-done",
+                "quality-gate": "run quality-gate-done (the board runs the gate itself; no agent)",
                 "approver": "spawn approver, then decision",
                 "needs-human": "stop: the human reads decision.md and runs approve or rework",
                 "abandoned": "nothing: the job is closed (archived or abandoned)",
@@ -856,7 +1172,7 @@ class Factory:
         """
         if not self.config_path.exists():
             raise FactoryError("no model config: run `models <preset> --cli claude` first")
-        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        config = self.backfill_missing_stages(json.loads(self.config_path.read_text(encoding="utf-8")))
         if config.get("cli") != "claude":
             raise FactoryError(
                 f"model config was written for {config.get('cli')}; "
@@ -914,7 +1230,7 @@ def first_content_line(text):
 
 
 def new_attempt():
-    return {"review_rounds": 0, "test_rebuilds": 0}
+    return {"review_rounds": 0, "test_rebuilds": 0, "gate_fixes": 0}
 
 
 def check_verdict_file(text, role):
@@ -955,13 +1271,17 @@ def build_parser():
     new.add_argument("--from-backlog", action="store_true")
     for name in (
         "spec-written", "approve-spec", "build-done", "test-audit-done",
-        "round-status", "close-round", "stride-review-done", "decision", "resume",
+        "round-status", "close-round", "stride-review-done", "quality-gate-done", "decision", "resume",
     ):
         commands.add_parser(name).add_argument("job_id")
     for name, text in (("rework", "note"), ("spec-feedback", "note"), ("abandon", "reason")):
         parser_for_note = commands.add_parser(name)
         parser_for_note.add_argument("job_id")
         parser_for_note.add_argument(text)
+    accept = commands.add_parser("accept-suppression")
+    accept.add_argument("job_id")
+    accept.add_argument("entry_id")
+    accept.add_argument("reason")
     archive = commands.add_parser("archive")
     archive.add_argument("job_id")
     archive.add_argument("reason", nargs="?", default="approved")
@@ -1001,6 +1321,10 @@ def main(argv=None):
             result = factory.close_round(arguments.job_id)
         elif command == "stride-review-done":
             result = factory.stride_review_done(arguments.job_id)
+        elif command == "quality-gate-done":
+            result = factory.quality_gate_done(arguments.job_id)
+        elif command == "accept-suppression":
+            result = factory.accept_suppression(arguments.job_id, arguments.entry_id, arguments.reason)
         elif command == "decision":
             result = factory.decision(arguments.job_id)
         elif command == "rework":

@@ -14,31 +14,51 @@ feature ─► spec-writer ─► [human: approve-spec] ─► builder ◄──
                                                       │                        │
                                                 test-auditor ── CHANGES ───────┤
                                                       │ PASS                   │
-                       ┌──────────────┬───────────────┼──────────────┐         │
-                       ▼              ▼               ▼              ▼         │
-                   security          ux              ui            code       │
-                       └──────────────┴── WAIT FOR ALL ┴─────────────┘         │
+          ┌─────────────┬───────────┬────────────────┼────────────────┐
+          ▼             ▼           ▼                ▼                ▼
+      security         ux          ui              code         architecture
+          └─────────────┴──────── WAIT FOR ALL ──────┴────────────────┘
                                                │ all PASS/N/A (≤ 2 review rounds) ┘
                                                ▼
                                             stride (whole-repo, once per job) ──CHANGES──┘
                                                │ PASS (no new CRITICAL/HIGH)
+                                               ▼
+                                            quality-gate (script, once per job) ──findings──► one gate-fix build ─┐
+                                               │ pass/warn, or tamper for the human            (back to the gate) ◄┘
                                                ▼
                                             approver ─► ESCALATE ─► needs-human
 ```
 
 | Stage | Reuses | Default tier | Writes |
 |-------|--------|--------------|--------|
-| spec-writer | better-prompt, then research | expensive | `prompt.md`, `spec.md` (reads `feature.md`) |
-| builder | implement + testing | expensive | code changes, `build.md` |
+| spec-writer | better-prompt, then research | expensive | `prompt.md`, `spec.md`, optionally `handover.md` (reads `feature.md`) |
+| builder | implement + testing | expensive | code changes, `build.md`, updates `handover.md` |
 | test-auditor | testing (audit mode) | cheap | `round-N/test-audit.md` |
 | security | security | expensive | `round-N/review-security.md` |
 | ux | UX checklist (`N/A` if no user-facing change) | cheap | `round-N/review-ux.md` |
 | ui | UI design checklist (`N/A` if no visual change) | cheap | `round-N/review-ui.md` |
 | code | verify | cheap | `round-N/review-code.md` |
+| architecture | proposal vs built (`N/A` if nothing to compare) | expensive | `round-N/review-architecture.md` |
 | stride | stride (whole-repo threat model) | expensive | `round-N/review-stride.md`, plus its own git-excluded profile/report |
 | approver | verify (final pass) | expensive | `decision.md` |
 
 Rules enforced by the board script:
+
+- `handover.md` is optional and living. It holds an executive summary and, only where a
+  picture helps, mermaid architecture, flow or sequence diagrams. The spec-writer writes the
+  proposal, the builder updates it each round to describe what was built (the approved
+  `spec.md` is never edited), and the approver finalises it; `decision.md` then shrinks to
+  `ESCALATE`, a one-line recommendation and a pointer. `spec-written`, `build-done` and
+  `decision` parse every mermaid block and reject an invalid one, naming the diagram and
+  line, before the job changes stage. This needs the optional validator packages
+  (`npm install --prefix .agents/skills/factory/validator`, Node.js 20.19+, 22.13+ or 24+);
+  without Node or the packages the board records a warning and continues. A syntax check says
+  nothing about whether a diagram is true, so the board also warns when code changed in a
+  round but the handover was not updated, and the architecture reviewer judges the content.
+- The **architecture** reviewer compares the approved proposal and the handover's diagrams
+  with `change.patch` and may answer `N/A`. The board writes that `N/A` itself when the spec
+  says `Architecture impact: no` and the handover has no diagram; a diagram keeps the review
+  on. Rounds that began before this reviewer existed are treated as `N/A` for it.
 
 - Agents read context from job files and write only their own file.
 - The test audit, security, code and STRIDE reviews start with `VERDICT: PASS`
@@ -58,16 +78,24 @@ Rules enforced by the board script:
   (markup, styles, scripts, templates, images), the script writes the UI
   `N/A` review itself and the UI reviewer is not spawned. UX always runs,
   because CLI output and messages can change in any source file.
-- A round closes only when all four reviews exist and are valid. The
+- A round closes only when all five reviews exist and are valid. The
   builder is never restarted mid-round.
 - Any review `CHANGES` sends the job back to a fresh builder; each attempt
   (initial build or rework) gets two review rounds. After that the approver
   runs with the open findings listed.
-- After the four reviewers all pass (or N/A), **stride** runs once against
+- After the five reviewers all pass (or N/A), **stride** runs once against
   the job's full diff and the repository's whole trust-zone model — not once
   per round. Its `CHANGES` (a new or newly-confirmed CRITICAL/HIGH threat on
   a changed component) sends the job back to the builder and consumes the
   same two-round budget as the other reviewers.
+- After STRIDE, the board runs the **quality gate** itself (`quality_gate.py`; there is no agent to
+  skip). It runs once per job, not on every build/test iteration. Fixable findings (banners,
+  secret-shaped literals, swallowed errors, a failing declared lint/type/test command) get one
+  gate-fix build round that returns straight to the gate, so the reviews predate that edit and
+  `decision.md` says so. Naming issues are warnings the builder must answer in `build.md`.
+  Loosened checks (suppression comments, linter or gate config edits, skipped, deleted or
+  weakened tests) are **tamper**: never sent back to the builder, listed for you, and cleared only
+  by `accept-suppression`. A missing optional tool (gitleaks, bandit) warns and never fails the gate.
 - `decision.md` must start with `ESCALATE`: the human always decides.
 - `approve-spec` rewrites the spec's `Status` line to `Approved`, because
   builders read the spec file, not the board.
@@ -152,10 +180,11 @@ feedback; it is saved as `spec-feedback-N.md`, the spec-writer revises
 
 1. `/engineering-guard-factory Add rate limiting to the login endpoint`
 2. Read `.factory/jobs/001-add-rate-limiting-to-the-login-endpoint/spec.md`.
-   Check the acceptance criteria and the `UI impact` line.
+   Check the acceptance criteria and the `UI impact` and `Architecture impact` lines. If the
+   spec-writer wrote a `handover.md`, read its diagrams too.
 3. `/engineering-guard-factory approve-spec 001-add-rate-limiting-to-the-login-endpoint`
 4. Watch the dashboard. When the job reaches **needs-human**, read
-   `decision.md`, the reviews, and `git diff`.
+   `handover.md` (when the job has one), `decision.md`, the reviews, and `git diff`.
 5. Either `rework <id> "<what to change>"`, or `approve <id>` and use the
    suggested branch, commit message and PR description to commit yourself.
    Approving also archives the job, including the same action from the
@@ -175,10 +204,9 @@ repository's `.gitignore` is not modified.
   config.json        # selected models per stage
   board.json         # job state; written only by factory_board.py
   backlog.md         # queue for `next`
-  dashboard.html     # copied from the skill on every run
   jobs/001-<slug>/
-    feature.md  prompt.md  spec.md  spec-feedback-N.md  build.md  decision.md  rework-N.md
-    round-1/change.patch  files.txt  test-audit.md  review-security.md  review-ux.md  review-ui.md  review-code.md  review-stride.md
+    feature.md  prompt.md  spec.md  handover.md  spec-feedback-N.md  build.md  decision.md  rework-N.md
+    round-1/change.patch  files.txt  test-audit.md  review-security.md  review-ux.md  review-ui.md  review-code.md  review-architecture.md  review-stride.md
 ```
 
 The STRIDE reviewer also maintains its own profile and living threat
@@ -188,27 +216,17 @@ and is not part of any single job's folder.
 
 ## Dashboard
 
-### Central Dashboard (Recommended)
-
-The central factory server aggregates all jobs across your active repositories into one unified view. Start it once with:
+The dashboard is the central factory server plus the Svelte UI in `ui/`. The server aggregates every active repository into one view, and each factory pushes its state to it when something changes. Start it from this checkout:
 
 ```
-/factory-server start
+npm run dashboard
 ```
 
-Then visit **http://localhost:5173/** to see all in-progress and archived jobs grouped by repository. Each factory automatically pushes updates when state changes—no per-repository setup needed. A job that reaches **needs-human** can be archived straight from its modal with **Archive job**; the reason is recorded and the repository's board is updated.
+`npm run dashboard` builds the Svelte UI in `ui/` when it is missing or older than its sources (the first run installs its packages, which needs Node.js 20.19+ or 22.12+), then runs the central server in the foreground at <http://localhost:5173/>; stop it with Ctrl-C. There is no per-repository mode: every factory pushes its state to the central server, which is the only source for the dashboard.
 
-This is the recommended way to monitor multiple repositories without managing separate dashboard instances.
+Jobs are cards across the stage columns (Pipeline view, which scrolls sideways so every stage stays in order) or grouped by repository (Grouped view); each round shows a `tests` chip followed by reviewer chips (green PASS, amber CHANGES, grey N/A or pending). Jobs waiting on you (spec-review, needs-human) are outlined in teal. Click a card to open the job. A job with a `handover.md` opens on an **Overview** tab: status chips, warnings, the recommendation from `decision.md`, and the handover rendered as a document with its mermaid diagrams drawn. A diagram that cannot be drawn shows a plain error card with its source instead of leaving a gap; the other tabs show each job file. Jobs from before `handover.md` existed have no Overview and open on their first file. Use **Archive job** in the viewer to close an approved job.
 
-### Per-Repository Dashboard (Optional)
-
-For a single repository's dashboard, run:
-
-```sh
-python3 -m http.server 8000 --bind 127.0.0.1 -d .factory
-```
-
-Open <http://localhost:8000/dashboard.html>. Jobs are cards across the stage columns (Pipeline view) or grouped by repository (Grouped view); each round shows a `tests` chip followed by reviewer chips (green PASS, amber CHANGES, grey N/A or pending). Jobs waiting on you (spec-review, needs-human) are outlined in teal. Click a card to read its markdown files, fetched on demand from `jobs/<job-id>/<file>`. The dashboard tries the central server's `/api/jobs` endpoint first; when that's unavailable (as under this plain static server, which has no backend) it falls back to polling `board.json` directly every two seconds. Static mode is read-only, so use the central dashboard to archive a job from the modal. Keep it bound to `127.0.0.1`: specs, security reviews and STRIDE's living threat register can describe unfixed vulnerabilities. STRIDE's profile and report live outside `.factory/`, at a separate git-excluded location, so they are not shown by this dashboard.
+Job markdown is written by agents, so the UI treats it as untrusted: HTML in it is shown as text, scripts and `javascript:` links are removed, and diagrams are drawn in mermaid's strict mode. Keep the server bound to `127.0.0.1`: specs, security reviews and STRIDE's living threat register can describe unfixed vulnerabilities. STRIDE's profile and report live outside `.factory/`, at a separate git-excluded location, so they are not shown by this dashboard.
 
 ## Board script reference
 
@@ -229,7 +247,9 @@ says why. You normally never call it yourself except for the Claude setup.
 | `test-audit-done <id>` | Reads `round-N/test-audit.md` → `review` (returns the reviewers to `spawn`), or `build` on `CHANGES`. |
 | `round-status <id>` | Never changes the stage: saves and prints reviewer verdicts, `invalid` files and whether the round is complete. |
 | `close-round <id>` | Closes a complete round → `build` or `stride-review`. |
-| `stride-review-done <id>` | Reads `round-N/review-stride.md` → `approver`, or `build` on `CHANGES` (consumes a review round, same budget as the four reviewers). |
+| `stride-review-done <id>` | Reads `round-N/review-stride.md` → `quality-gate`, or `build` on `CHANGES` (consumes a review round, same budget as the five reviewers). |
+| `quality-gate-done <id>` | Runs `quality_gate.py` itself (no agent) → `approver`, or one gate-fix `build` round for fixable findings. Tamper entries never loop back. |
+| `accept-suppression <id> <entry> <reason>` | Human only: accepts one loosened check recorded by the gate. |
 | `decision <id>` | `approver` → `needs-human` (needs `ESCALATE`). |
 | `rework <id> "<note>"` | `needs-human` → `build`; also marks `spec.md` approved. |
 | `abandon <id> "<reason>"` | Any stage → `abandoned`. |

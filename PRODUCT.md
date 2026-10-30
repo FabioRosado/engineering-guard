@@ -25,11 +25,11 @@ Jobs flow through these stages, and some stages repeat in rounds:
 Jobs can loop back to Build if reviews fail (max 2 rounds). Human stages and escalations need immediate attention.
 
 ## Current State (What Works)
-- Two-dashboard system: job-centric (`dashboard.html`) and centralized repo view (`central-dashboard.html`)
+- One dashboard: a Svelte app (`ui/`) served by the central factory server, with a Pipeline view and a repository-grouped view
 - Real-time polling from JSON/API
 - Kanban-style layout showing pipeline stages
 - Click-to-inspect job details with file viewer
-- Basic markdown rendering for review findings
+- Markdown rendering for every job file, and an Overview tab that renders a job's `handover.md` with its mermaid diagrams
 - Color-coded verdict chips (PASS/CHANGES/N/A/pending)
 - Human-attention highlighting on cards requiring decisions
 
@@ -50,11 +50,12 @@ Jobs can loop back to Build if reviews fail (max 2 rounds). Human stages and esc
 - **Mobile-friendly**: Works at tablet and mobile sizes, not just desktop
 
 ## Design Constraints & Anchors
-- **Single HTML file**: No build step, no dependencies (inline JS/CSS only)
-- **Lightweight JS**: Keep existing polling and rendering patterns
+- **Svelte and Vite, built on install**: `npm run dashboard` builds `ui/` when needed and serves it from the central server. Packages stay under `ui/` and out of Git; `ui/dist/` is not committed.
+- **Untrusted content**: job files are written by agents. Markdown is sanitised, raw HTML is shown as text, and diagrams render in mermaid's strict mode.
+- **Lightweight JS**: Keep the 2-second polling, and load mermaid only when a diagram is on screen.
 - **Data model**: Preserve job shape (id, title, stage, reviews, test_audit, stride, warnings, files, etc.)
-- **Color palette**: Reuse semantic colors (pass green, changes amber, pending gray, human purple, danger red)
-- **Async markdown**: Files still fetched on-demand when user opens detail view
+- **Color palette**: Reuse semantic colors (pass green, changes amber, pending gray, human teal, danger red)
+- **Files inlined by the server**: the central server sends each job's markdown in `job.files`; there is no per-repository `board.json` mode
 
 ## Scope: Redesign Dashboard(s)
-We're redesigning both `dashboard.html` (job-centric) and `central-dashboard.html` (repo-grouped). May consolidate into one if it serves both use cases better. Keep the factory state and API intact; only the UI changes.
+The earlier job-centric and repository-grouped dashboards are now one Svelte app. Keep the factory state and API intact; only the UI changes.

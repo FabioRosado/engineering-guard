@@ -1,0 +1,14 @@
+{
+  "name": "engineering-guard-factory-validator",
+  "private": true,
+  "type": "module",
+  "description": "Mermaid syntax validator used by factory_board.py. Optional: the board warns and continues when this is not installed.",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
+  "dependencies": {
+    "jsdom": "29.1.1",
+    "marked": "18.1.2",
+    "mermaid": "11.17.2"
+  }
+}

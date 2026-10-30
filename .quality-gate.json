@@ -1,0 +1,9 @@
+{
+  "checks": {
+    "lint": ["ruff", "check", "--select", "F,E9", "{changed}"],
+    "test": ["python3", "-m", "unittest", "discover", "-s", "test", "-p", "test_*.py"]
+  },
+  "suffixes": {
+    "lint": [".py"]
+  }
+}

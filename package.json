@@ -4,11 +4,16 @@
   "type": "module",
   "scripts": {
     "test": "python3 -m unittest discover -s test -p 'test_*.py'",
+    "dashboard": "node scripts/dashboard.mjs",
+    "quality": "python3 .agents/skills/factory/scripts/quality_gate.py",
     "demo:shallow": "npm --prefix demo run test:shallow",
     "demo:behavior": "npm --prefix demo run test:behavior",
     "demo:implement": "npm --prefix demo run test:implement",
     "demo:security": "node demo/security/verify-regression.mjs",
     "demo:quality": "node demo/quality/verify-comparison.mjs",
-    "demo:python-startup": "python3 -B demo/python/startup/verify.py"
+    "demo:python-startup": "python3 -B demo/python/startup/verify.py",
+    "ui:build": "npm --prefix ui run build",
+    "ui:test": "npm --prefix ui test",
+    "test:all": "npm test && npm run ui:test"
   }
 }

@@ -13,6 +13,10 @@ readability. Use the test results in `<round>/test-audit.md` instead of
 re-running the whole suite; run a specific test only when you need evidence
 the audit does not give. Report real results only.
 
+Do not review `handover.md` diagrams or compare the build with the proposed architecture:
+the `architecture` reviewer owns that, and reporting it twice sends the builder two copies of
+one finding.
+
 **Regression check.** Compare the diff against the spec's acceptance
 criteria: does it change any existing behaviour, public contract, or adjacent
 code path that the acceptance criteria do not call for? If the spec is a bug

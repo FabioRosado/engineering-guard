@@ -1,7 +1,7 @@
 # Central Factory Dashboard
 
-**Status:** Approved 2026-10-28  
-**Revision:** 1 (2026-10-28)
+**Status:** Revision 2 Approved 2026-10-30 (Revision 1 approved 2026-10-28)  
+**Revision:** 2 (2026-10-30)
 
 ## Objective
 
@@ -17,6 +17,7 @@ Add a system-wide factory dashboard that aggregates job state from all active re
 6. Dashboard polls `/api/jobs` every 2 seconds; multiple worktrees of the same repository sync to the same central server.
 7. Network failures do not block factory progress; push failures are logged but non-blocking.
 8. Command `/factory-server [start|stop|status]` manages the central server lifecycle.
+9. *(Revision 2)* `npm run dashboard` starts the central server in the foreground of a terminal, without an agent session.
 
 ## Repository evidence
 
@@ -236,11 +237,79 @@ When a factory syncs, it sends:
 2. **Large jobs:** If a single job has many rounds, payload could exceed MB. Observe and optimize if needed.
 3. **Server restart:** On restart, in-progress jobs are reloaded from disk. Verify no data loss during restart.
 
+## Revision 2 — Terminal launcher (approved)
+
+Extends Revision 1 without changing D12–D18. Adds a terminal entry point for the lifecycle already required by criterion 8, which is currently implemented only as an agent slash command (`.kilo/commands/factory-server.md`).
+
+### Developer decisions (this revision)
+
+| # | Decision |
+|---|----------|
+| D19 | Launcher is an npm script, `npm run dashboard`, not a Makefile (developer: "not married to make"). |
+| D20 | Scope is the central server only. The per-repo static dashboard is out of scope (developer: "I don't want to start the factory for each repo"). |
+
+### Recommendations R1–R3 (approved with the revision on 2026-10-30)
+
+- **R1.** Hard-code defaults: pass no `--host`/`--port`; the script's own `127.0.0.1:5173` stays the single source of truth. Reason: D17 fixes these, and `factory_board.py:123` hardcodes the push URL to port 5173, so a different port would silently break sync (push failures are non-blocking, D15) and a non-loopback host would breach the local-only constraint.
+- **R2.** No `test` target is needed. `npm test` already exists.
+- **R3.** Foreground only. `stop`/`status`/`logs` remain with `/factory-server`.
+
+### Proposed change
+
+`package.json` gains one script:
+
+```json
+"dashboard": "python3 .agents/skills/factory/scripts/central_factory_server.py"
+```
+
+Plus one-line mentions of `npm run dashboard` in `docs/factory.md` ("Central Dashboard") and `.kilo/commands/factory-server.md`. No Python changes.
+
+### Repository evidence (observed 2026-10-30)
+
+- Server already runs in the foreground, serves the dashboard at `/`, answers `/health`, stops cleanly on Ctrl-C (smoke-tested on a spare port).
+- It detects a live instance via `/health` and exits with a message, so a repeat `npm run dashboard` is safe (`central_factory_server.py:446`).
+- `package.json` already holds the project's scripts (`test`, `demo:*`); no Makefile or `pyproject.toml` exists.
+- `scripts/verification_runner.py` runs only explicitly requested scripts and merely lists the others (lines 419-422, 478), so a long-running `dashboard` script will not be executed by verification unless someone requests it.
+- README states Node 18+ and npm are already prerequisites (README.md:36); Node 22 and npm 10.9 are present locally. The script itself needs only Python 3, which the README also requires.
+
+### Alternatives (Revision 2)
+
+| Option | Status | Rationale |
+|--------|--------|-----------|
+| `npm run dashboard` | **Selected (D19)** | Developer's choice. Matches existing script convention; no new tool or file. |
+| `Makefile` with `run` | Rejected by developer | Introduces a new build tool for one command. Revisit only if the project adopts make elsewhere. |
+| Overridable `PORT`/`HOST` | Rejected (R1, approved) | Conflicts with D17 and the hardcoded push client. Revisit if the push client's URL is first made configurable (env var read by both sides); that is a separate change requiring approval. |
+| Wrapper CLI / entry point | Rejected | No demonstrated need (YAGNI). |
+| Daemonise (nohup/launchd) | Rejected | Developer wants a terminal session; `/factory-server start` covers background use. |
+
+### Implementation steps
+
+1. Add the `dashboard` script to `package.json`.
+2. Add one line to `docs/factory.md` under "Central Dashboard" and to `.kilo/commands/factory-server.md`.
+3. No new tests: the change is a one-line launcher over an already-tested script. Verify manually.
+
+### Verification
+
+- `npm run dashboard` prints the listening URL; `http://127.0.0.1:5173/` returns the dashboard and `/health` returns `{"status":"ok"}`.
+- Ctrl-C stops it cleanly.
+- A second `npm run dashboard` while one is running exits with the "already running" message.
+- `npm test` still passes.
+
+### Non-goals
+
+Configurable port/host; background lifecycle; per-repo dashboard; fixing `/factory-server` `stop`/`status`/`logs` having no code behind them; the stale `central-dashboard.html` references in `PRODUCT.md`/`DESIGN.md`.
+
+### Risks
+
+- The `dashboard` script name appears in `available` output of the verification runner; harmless unless requested explicitly.
+- Doc drift above is pre-existing and not made worse.
+
 ## Revision and approval status
 
-**Status:** Approved 2026-10-28 (Revision 1)  
+**Status (Revision 2):** Approved 2026-10-30. Developer approved the complete revision, including D19–D20 and R1–R3 ("approve let's do it").  
+**Status (Revision 1):** Approved 2026-10-28  
 **Developer approval:** Yes, explicit. Decisions D12-D18 approved.  
 **Approval date:** 2026-10-28  
 **Approved by:** Developer (Fabio Rosado)
 
-Ready for implementation.
+Revision 1 is implemented. Revision 2 is approved for implementation.

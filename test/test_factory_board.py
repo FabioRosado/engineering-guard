@@ -11,8 +11,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOARD_SCRIPT = PROJECT_ROOT / ".agents" / "skills" / "factory" / "scripts" / "factory_board.py"
 
 
-class FactoryBoardTests(unittest.TestCase):
-    """Drive the real board script against disposable Git repositories."""
+class FactoryBoardHarness:
+    """Disposable Git repository plus helpers that drive the real board script.
+
+    A mixin rather than a base TestCase so other test modules can reuse it without
+    unittest re-collecting and re-running every board test inside the subclass.
+    """
 
     def setUp(self):
         self.temp_directory = tempfile.TemporaryDirectory(prefix="engineering-guard-factory-")
@@ -91,6 +95,10 @@ class FactoryBoardTests(unittest.TestCase):
         return self.factory("test-audit-done", job_id)
 
     def write_reviews(self, job_id, round_number, verdicts):
+        # Most tests exercise round, STRIDE or gate mechanics and name only the four original
+        # reviewers; the architecture review is then fixture setup, not the behaviour under test.
+        # Tests about the architecture reviewer pass it explicitly and are unaffected.
+        verdicts = {"architecture": "N/A", **verdicts}
         for reviewer, verdict in verdicts.items():
             body = "Notes.\n"
             # security/stride CHANGES must cite a CRITICAL/HIGH finding (severity floor);
@@ -100,16 +108,23 @@ class FactoryBoardTests(unittest.TestCase):
             self.job_file(job_id, f"round-{round_number}/review-{reviewer}.md", f"VERDICT: {verdict}\n\n{body}")
 
     def pass_stride_review(self, job_id, round_number):
-        """Reach the approver from stride-review with a PASS, as most tests need."""
+        """Finish stride-review with a PASS; the job then waits at the quality gate."""
         self.job_file(job_id, f"round-{round_number}/review-stride.md", "VERDICT: PASS\n")
         return self.factory("stride-review-done", job_id)
 
     def close_round_to_approver(self, job_id, round_number):
-        """close-round now stops at stride-review; most tests just want the approver."""
+        """close-round stops at stride-review, which leads to the quality gate; most tests
+        only care about reaching the approver, so this walks all three."""
         self.assertEqual(self.factory("close-round", job_id)["next"], "stride-review")
-        result = self.pass_stride_review(job_id, round_number)
+        self.assertEqual(self.pass_stride_review(job_id, round_number)["next"], "quality-gate")
+        result = self.factory("quality-gate-done", job_id)
         self.assertEqual(result["next"], "approver")
         return result
+
+
+
+class FactoryBoardTests(FactoryBoardHarness, unittest.TestCase):
+    """Rules of the board state machine."""
 
     def test_factory_output_is_excluded_locally_without_touching_tracked_files(self):
         self.factory("init")
@@ -257,7 +272,7 @@ class FactoryBoardTests(unittest.TestCase):
         result = self.factory("close-round", job_id)
         self.assertEqual(result["next"], "stride-review")
         self.assertEqual([entry["round"] for entry in result["job"]["history"]], [1, 2])
-        self.assertEqual(self.pass_stride_review(job_id, 2)["next"], "approver")
+        self.assertEqual(self.pass_stride_review(job_id, 2)["next"], "quality-gate")
 
     def test_stride_review_runs_once_per_job_after_the_four_reviewers_pass(self):
         job_id = self.job_in_review()
@@ -278,8 +293,8 @@ class FactoryBoardTests(unittest.TestCase):
         self.assertIn("VERDICT: PASS or VERDICT: CHANGES", error)
 
         result = self.pass_stride_review(job_id, 1)
-        self.assertEqual(result["next"], "approver")
-        self.assertEqual(result["job"]["stage"], "approver")
+        self.assertEqual(result["next"], "quality-gate")
+        self.assertEqual(result["job"]["stage"], "quality-gate")
         self.assertEqual(result["job"]["stride"], "PASS")
 
     def test_stride_review_changes_needs_critical_or_high_and_consumes_a_review_round(self):
@@ -322,8 +337,8 @@ class FactoryBoardTests(unittest.TestCase):
             "VERDICT: CHANGES\n\nSEVERITY: CRITICAL\nE-002 still present after the fix.\n",
         )
         result = self.factory("stride-review-done", job_id)
-        self.assertEqual(result["next"], "approver")
-        self.assertEqual(result["job"]["stage"], "approver")
+        self.assertEqual(result["next"], "quality-gate")
+        self.assertEqual(result["job"]["stage"], "quality-gate")
         self.assertTrue(any("STRIDE" in warning for warning in result["job"]["warnings"]))
 
     def test_reviewers_wait_for_a_passing_test_audit(self):
@@ -357,7 +372,7 @@ class FactoryBoardTests(unittest.TestCase):
         self.assertEqual(status["next"], "stride-review")
         self.assertTrue(any("test audit" in warning for warning in status["job"]["warnings"]))
         self.assertEqual([entry["test_audit"] for entry in status["job"]["history"]], ["CHANGES", "CHANGES"])
-        self.assertEqual(self.pass_stride_review(job_id, 2)["next"], "approver")
+        self.assertEqual(self.pass_stride_review(job_id, 2)["next"], "quality-gate")
 
     def test_test_audit_rebuilds_do_not_use_up_review_rounds(self):
         job_id = self.job_in_review_after_failed_test_audit()
@@ -380,7 +395,7 @@ class FactoryBoardTests(unittest.TestCase):
 
         job = self.factory("rework", job_id, "Use a sliding window")
         self.assertEqual((job["stage"], job["round"]), ("build", 2))
-        self.assertEqual(job["attempt"], {"review_rounds": 0, "test_rebuilds": 0})
+        self.assertEqual(job["attempt"], {"review_rounds": 0, "test_rebuilds": 0, "gate_fixes": 0})
         note = self.repo / ".factory" / "jobs" / job_id / "rework-2.md"
         self.assertIn("sliding window", note.read_text(encoding="utf-8"))
 
@@ -465,7 +480,7 @@ class FactoryBoardTests(unittest.TestCase):
         self.simulate_build(job_id)
         self.factory("build-done", job_id)
         result = self.pass_test_audit(job_id, 1)
-        self.assertEqual(result["spawn"], ["security", "ux", "code"])
+        self.assertEqual(result["spawn"], ["security", "ux", "code", "architecture"])
         self.assertEqual((result["job"]["reviews"]["ux"], result["job"]["reviews"]["ui"]), ("pending", "N/A"))
         self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "code": "PASS"})
         self.close_round_to_approver(job_id, 1)
@@ -478,13 +493,13 @@ class FactoryBoardTests(unittest.TestCase):
         self.job_file(other, "build.md", "built\n")
         self.factory("build-done", other)
         result = self.pass_test_audit(other, 1)
-        self.assertEqual(result["spawn"], ["security", "ux", "ui", "code"])
+        self.assertEqual(result["spawn"], ["security", "ux", "ui", "code", "architecture"])
 
     def test_ui_impact_mentioned_outside_its_field_line_does_not_skip_review(self):
         job_id = self.approved_job("**UI impact:** yes\n\nAn earlier draft said UI impact: no.\n")
         self.simulate_build(job_id)
         self.factory("build-done", job_id)
-        self.assertEqual(self.pass_test_audit(job_id, 1)["spawn"], ["security", "ux", "ui", "code"])
+        self.assertEqual(self.pass_test_audit(job_id, 1)["spawn"], ["security", "ux", "ui", "code", "architecture"])
 
     def test_snapshot_handles_files_that_are_not_utf8(self):
         job_id = self.approved_job()
@@ -582,6 +597,180 @@ class FactoryBoardTests(unittest.TestCase):
         stride_agent = (claude_home / "agents" / "eg-review-stride.md").read_text(encoding="utf-8")
         self.assertIn("model: opus", stride_agent)
         self.assertNotIn("Edit", stride_agent)
+
+    def job_at_quality_gate(self):
+        job_id = self.job_in_review()
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.assertEqual(self.factory("close-round", job_id)["next"], "stride-review")
+        self.assertEqual(self.pass_stride_review(job_id, 1)["next"], "quality-gate")
+        return job_id
+
+    def gate_fix_build(self, job_id, source):
+        """Stand in for the builder repairing what the gate reported."""
+        (self.repo / "app.py").write_text(source, encoding="utf-8")
+        self.job_file(job_id, "build.md", "fixed the gate findings\n")
+        return self.factory("build-done", job_id)
+
+    def test_clean_change_passes_the_gate_straight_to_the_approver(self):
+        job_id = self.job_at_quality_gate()
+        result = self.factory("quality-gate-done", job_id)
+        self.assertEqual(result["next"], "approver")
+        self.assertEqual(result["job"]["stage"], "approver")
+        report = self.repo / ".factory" / "jobs" / job_id / "round-1" / "quality-gate.json"
+        self.assertTrue(report.is_file())
+        self.assertTrue((report.parent / "quality-gate.md").is_file())
+
+    def test_gate_is_not_run_during_the_build_test_review_loop(self):
+        job_id = self.job_in_review()
+        job_dir = self.repo / ".factory" / "jobs" / job_id
+        self.assertFalse(list(job_dir.glob("round-*/quality-gate.json")))
+        error = self.factory("quality-gate-done", job_id, expect_error=True)
+        self.assertIn("expected one of ['quality-gate']", error)
+
+    def test_a_finding_sends_the_job_to_one_gate_fix_round_that_skips_tests_and_reviews(self):
+        job_id = self.job_in_review()
+        (self.repo / "app.py").write_text("try:\n    int('x')\nexcept ValueError:\n    pass\n", encoding="utf-8")
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.factory("close-round", job_id)
+        self.pass_stride_review(job_id, 1)
+
+        result = self.factory("quality-gate-done", job_id)
+        self.assertEqual(result["next"], "rebuild")
+        self.assertEqual((result["job"]["stage"], result["job"]["round"]), ("build", 2))
+        self.assertEqual(result["job"]["attempt"]["gate_fixes"], 1)
+        self.assertEqual(result["job"]["gate_fix_rounds"], 1)
+
+        # The fixed build goes straight back to the gate: no new test audit or reviews.
+        job = self.gate_fix_build(job_id, "VALUE = 3\n")
+        self.assertEqual(job["stage"], "quality-gate")
+        result = self.factory("quality-gate-done", job_id)
+        self.assertEqual(result["next"], "approver")
+        self.assertNotEqual(result["report"]["status"], "fail")
+
+    def test_findings_left_after_the_fix_round_continue_to_the_approver_as_warnings(self):
+        job_id = self.job_in_review()
+        broken = "try:\n    int('x')\nexcept ValueError:\n    pass\n"
+        (self.repo / "app.py").write_text(broken, encoding="utf-8")
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.factory("close-round", job_id)
+        self.pass_stride_review(job_id, 1)
+        self.assertEqual(self.factory("quality-gate-done", job_id)["next"], "rebuild")
+
+        self.gate_fix_build(job_id, broken + "# still broken\n")
+        result = self.factory("quality-gate-done", job_id)
+        self.assertEqual(result["next"], "approver")
+        self.assertEqual(result["job"]["stage"], "approver")
+        self.assertTrue(any("still reports findings" in warning for warning in result["job"]["warnings"]))
+        self.assertEqual(result["job"]["attempt"]["gate_fixes"], 1)
+
+    def test_tamper_is_not_sent_to_the_builder_and_needs_the_humans_acceptance(self):
+        job_id = self.job_in_review()
+        (self.repo / "app.py").write_text("import os  # noqa\nVALUE = 2\n", encoding="utf-8")
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.factory("close-round", job_id)
+        self.pass_stride_review(job_id, 1)
+
+        result = self.factory("quality-gate-done", job_id)
+        self.assertEqual(result["next"], "approver")
+        self.assertEqual(result["job"]["attempt"]["gate_fixes"], 0)
+        unresolved = result["report"]["summary"]["unresolvedTamper"]
+        self.assertEqual(len(unresolved), 1)
+        self.assertTrue(any("tamper" in warning for warning in result["job"]["warnings"]))
+
+        error = self.factory("accept-suppression", job_id, "not-a-real-entry", "because", expect_error=True)
+        self.assertIn("unknown tamper entry", error)
+        error = self.factory("accept-suppression", job_id, unresolved[0], "  ", expect_error=True)
+        self.assertIn("reason", error)
+        job = self.factory("accept-suppression", job_id, unresolved[0], "false positive on a re-export")
+        self.assertEqual(job["accepted_tamper"][unresolved[0]]["reason"], "false positive on a re-export")
+
+    def test_accepted_tamper_counts_as_resolved_on_the_next_gate_run(self):
+        job_id = self.job_in_review()
+        # One fixable finding (forces a second gate run) plus one tamper entry.
+        source = "import os  # noqa\ntry:\n    int('x')\nexcept ValueError:\n    pass\n"
+        (self.repo / "app.py").write_text(source, encoding="utf-8")
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.factory("close-round", job_id)
+        self.pass_stride_review(job_id, 1)
+
+        first = self.factory("quality-gate-done", job_id)
+        self.assertEqual(first["next"], "rebuild")
+        entry = first["report"]["summary"]["unresolvedTamper"][0]
+        self.factory("accept-suppression", job_id, entry, "reviewed by the human")
+
+        self.gate_fix_build(job_id, "import os  # noqa\nVALUE = 3\n")
+        second = self.factory("quality-gate-done", job_id)
+        self.assertEqual(second["report"]["summary"]["unresolvedTamper"], [])
+        self.assertTrue(all(item["accepted"] for item in second["report"]["tamper"]))
+        self.assertIn(second["report"]["status"], ("pass", "warn"))
+        self.assertFalse(any("tamper" in warning for warning in second["job"]["warnings"]))
+
+    def test_a_missing_optional_tool_is_carried_as_a_warning_not_a_failure(self):
+        job_id = self.job_at_quality_gate()
+        result = self.factory("quality-gate-done", job_id)
+        self.assertEqual(result["next"], "approver")
+        skipped = result["report"]["summary"]["skippedTools"]
+        for tool in skipped:
+            self.assertTrue(any(tool in warning for warning in result["job"]["warnings"]), tool)
+
+    def test_resume_names_the_quality_gate_step(self):
+        job_id = self.job_at_quality_gate()
+        self.assertIn("quality-gate-done", self.factory("resume", job_id)["next"])
+
+    def test_a_job_at_the_gate_still_blocks_another_job_from_starting(self):
+        first = self.job_at_quality_gate()
+        second = self.factory("new", "Another feature")["id"]
+        self.job_file(second, "feature.md", "feature\n")
+        self.job_file(second, "prompt.md", "prompt\n")
+        self.job_file(second, "spec.md", "spec\n")
+        self.factory("spec-written", second)
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "wip")
+        error = self.factory("approve-spec", second, expect_error=True)
+        self.assertIn(first, error)
+
+    def job_blocked_during_a_gate_fix(self):
+        job_id = self.job_in_review()
+        (self.repo / "app.py").write_text("try:\n    int('x')\nexcept ValueError:\n    pass\n", encoding="utf-8")
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.factory("close-round", job_id)
+        self.pass_stride_review(job_id, 1)
+        self.assertEqual(self.factory("quality-gate-done", job_id)["next"], "rebuild")
+        # The gate-fix builder cannot proceed, so the job goes to the human.
+        self.job_file(job_id, "build.md", "BLOCKED: cannot fix without a new dependency\n")
+        return job_id
+
+    def test_a_blocked_gate_fix_build_clears_the_gate_fix_shortcut(self):
+        job_id = self.job_blocked_during_a_gate_fix()
+        blocked = self.factory("build-done", job_id)
+        self.assertEqual(blocked["stage"], "needs-human")
+        self.assertIsNone(blocked["quality_gate"])
+
+    def test_rework_after_a_blocked_gate_fix_goes_back_through_tests_and_reviews(self):
+        job_id = self.job_blocked_during_a_gate_fix()
+        self.factory("build-done", job_id)
+        rework = self.factory("rework", job_id, "Use the standard library instead")
+        self.assertEqual(rework["attempt"]["gate_fixes"], 0)
+        self.gate_fix_build(job_id, "VALUE = 5\n")
+        self.assertEqual(self.factory("show", job_id)["stage"], "test-audit")
+
+    def test_rework_clears_a_stale_gate_fix_flag_whatever_route_left_it_set(self):
+        # Construct the stale state directly: a job in needs-human whose quality_gate is still "fixing".
+        job_id = self.job_in_review()
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.close_round_to_approver(job_id, 1)
+        self.job_file(job_id, "decision.md", "ESCALATE\n\nready\n")
+        self.factory("decision", job_id)
+        board_path = self.repo / ".factory" / "board.json"
+        board = json.loads(board_path.read_text(encoding="utf-8"))
+        board["jobs"][0]["quality_gate"] = "fixing"
+        board_path.write_text(json.dumps(board), encoding="utf-8")
+
+        rework = self.factory("rework", job_id, "Try another approach")
+        self.assertIsNone(rework["quality_gate"])
+        self.gate_fix_build(job_id, "VALUE = 6\n")
+        self.assertEqual(self.factory("show", job_id)["stage"], "test-audit")
+
 
 if __name__ == "__main__":
     unittest.main()

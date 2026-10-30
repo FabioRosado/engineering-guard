@@ -13,7 +13,7 @@ Semantic:
   --changes:    #f59e0b  (amber, warning/needs work)
   --pending:    #d1d5db  (slate, in-progress)
   --na:         #9ca3af  (gray, not applicable)
-  --human:      #8b5cf6  (violet, requires human decision)
+  --human:      #0f766e  (teal, requires human decision)
   --danger:     #ef4444  (red, error/invalid)
 
 Neutral:
@@ -68,7 +68,7 @@ Base: 4px grid
 **States:**
 - Default: white bg, gray-200 border, subtle hover lift
 - Hover: border lightens, shadow appears, cursor pointer
-- Attention (needs human): 2px violet border, bg shadow in violet-100 at 10% opacity
+- Attention (needs human): teal border and a teal-tinted top of the card
 
 **Content hierarchy:**
 ```
@@ -93,11 +93,11 @@ Base: 4px grid
 
 ### Status Badges / Chips
 **Spec stage:** gray background, dark text
-**Spec Review / Needs Human:** violet badge, white text, slightly larger
+**Spec Review / Needs Human:** teal column header and flag icon
 **Other stages:** subtle bg, muted text
 **Verdict chips (in card & modal):**
   - Test audit: `tests` label + verdict color
-  - Reviewer chips: `security`, `ux`, `ui`, `code` + verdict
+  - Reviewer chips: `security`, `ux`, `ui`, `code`, `architecture` + verdict (the architecture chip is hidden on rounds recorded before that reviewer existed)
   - STRIDE: `stride` + verdict
   All: 11px, 500 weight, 8px horizontal padding, 2px vertical
 
@@ -186,7 +186,7 @@ Base: 4px grid
 - On stage change: soft transition, no jump
 
 ### Human Decision States
-- Needs-human jobs: prominent card styling (violet border + bg tint)
+- Needs-human jobs: prominent card styling (teal border + bg tint)
 - Click-through to approval/escalation actions (if API exists)
 - Alternative: highlight with ⚠ icon, suggest next action in card subtitle
 
@@ -228,12 +228,8 @@ Desk (≥769px):
 - ARIA: `role="dialog"` on modal, `aria-label` on icon-only buttons, `aria-live` on status
 - Keyboard: Escape closes modal, Tab cycles through focusable elements
 
-## One-Page Dashboard Consolidation (Optional)
-If combining `dashboard.html` and `central-dashboard.html`, consider:
-- Single view with tabs: "My Jobs" vs. "All Repos"
-- Repo grouping sections remain visible in "All Repos" tab
-- Shared header, navigation, modals
-- Same responsive behavior
+## Overview tab
+A job with a `handover.md` opens on **Overview**: a one-row status line (stage, round, verdict chips), warnings, the recommendation from `decision.md`, then the handover as a reading document. Diagrams are drawn in the current theme and redrawn on a theme change. A diagram that cannot be drawn becomes an error card with its source. Jobs without a handover open on their first file.
 
 ---
 

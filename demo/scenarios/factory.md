@@ -2,7 +2,7 @@
 
 Run `python3 -m unittest discover -s test -p 'test_factory_board.py'` to check the board rules (spec gate, test audit before reviews, wait-for-all, round limit, forced `ESCALATE`, clean-worktree and single-active-job guards) in disposable Git repositories. These tests do not run any agent.
 
-For a live run, use a disposable copy of this repository with a clean worktree. Invoke `/engineering-guard-factory models <preset>` for your CLI (on Claude Code, follow the setup in `docs/factory.md` first), then `/engineering-guard-factory Fix the checkout discount so demo:behavior passes`. Serve the dashboard with `python3 -m http.server 8000 --bind 127.0.0.1 -d .factory`.
+For a live run, use a disposable copy of this repository with a clean worktree. Invoke `/engineering-guard-factory models <preset>` for your CLI (on Claude Code, follow the setup in `docs/factory.md` first), then `/engineering-guard-factory Fix the checkout discount so demo:behavior passes`. Run the dashboard with `npm run dashboard` and open <http://localhost:5173/>.
 
 Expected behaviour:
 
