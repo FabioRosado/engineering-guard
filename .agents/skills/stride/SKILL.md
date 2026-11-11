@@ -196,7 +196,34 @@ category plus one.
 same evidence-based reasoning as `engineering-guard-security` §7: impact
 on confidentiality/integrity/availability, attacker prerequisites,
 exposure, scope, and existing mitigations. Do not assign CRITICAL merely
-because a weakness belongs to a named category.
+because a weakness belongs to a named category. Use the five severity
+anchors and the High/Medium test in `engineering-guard-security` §7
+(`../security/SKILL.md`); overall severity cannot exceed the impact you
+demonstrated.
+
+**Evidence bar:** a threat enters the register only when you can name,
+from evidence, the lower-trust principal, the input it controls, the
+control that should stop it, the boundary crossed, the affected resource,
+and a concrete result. A missing best practice, deployment behaviour you
+had to guess, and self-impact (the actor only harms themselves or uses
+authority they already hold) are not threats. A category name in this
+skill's checklist is a place to look, not evidence.
+
+**Defense-in-depth rule:** if one layer already stops the attack, a missing
+second layer is a hardening note (put it in Architecture Observations),
+not a register entry at any severity. An already-registered threat is not
+deleted: mark it `false_positive` with the control as the reason.
+
+**`needs_validation`:** when a plausible threat is blocked by one fact you
+cannot observe from the repository (for example proxy or gateway
+configuration), do not guess a severity. State the exact unresolved fact,
+a safe local or owner-observed check, and the result if the fact is
+unfavourable. It has no severity, so it never enters the register or the
+CSV, both of which require one. Record it under Architecture Observations
+in the living report (§7), separate from hardening notes, and re-examine it
+on the next run. If you cannot name the fact and the check, drop it. See
+`../security/SKILL.md` §5 for the full definition and §6 for the rule on
+running target code.
 
 **Status lifecycle:**
 
@@ -226,7 +253,8 @@ For each category, evaluate every boundary crossing in the profile using
 the checklist below plus the profile's own search hints. Capture, per
 threat: ID, category, severity, component, flow, title, threat scenario,
 the gap (with `file:line` and a short excerpt), mitigation, an
-existing-controls cross-reference when one applies, and dates.
+existing-controls cross-reference when one applies, and dates. Apply the
+evidence bar above before adding a threat.
 
 ### S — Spoofing
 
@@ -295,7 +323,14 @@ boundary, middleware, or upstream enforcement the isolated code view
 missed — confirm or downgrade the severity accordingly, and attach an
 existing-controls cross-reference when a documented decision already
 covers the gap. Do not fabricate a compensating control; if none is
-found, keep the severity as assessed.
+found, keep the severity as assessed. If the compensating control is real
+and stops the attack, apply the defense-in-depth rule from §4: the
+remaining gap is a hardening note in Architecture Observations, not a
+threat, so it gets no register or CSV entry at any severity. A threat
+already in the register is never deleted; mark it `false_positive` with the
+control as the reason (§4 transitions). If whether the control exists
+depends on a fact outside the repository, the item becomes
+`needs_validation`, not a guessed severity.
 
 ## 6. Merge and reconcile
 
@@ -316,8 +351,9 @@ mandated alternative):
    resolved date), a Detailed Threat Register per category, Architecture
    Observations (cross-cutting structural issues, which single boundaries
    the whole model depends on, documented "by design" decisions and their
-   deployment-time caveats), a coverage map against existing controls, and
-   priority-ordered recommendations.
+   deployment-time caveats, hardening notes, and any `needs_validation`
+   items from §4, kept outside the register), a coverage map against
+   existing controls, and priority-ordered recommendations.
 2. **A CSV tracker** mirroring the Flat Threat Register exactly, with
    columns `threat_id,category,severity,status,component,flow_component,
    title,controls_xref,first_seen,last_confirmed,resolved_date,notes`,
@@ -336,7 +372,9 @@ updated (with drift notes); the threat delta (new, resolved, regressed)
 since the last run; the open burden (count, critical, high) across
 categories; how many findings overlap with already-documented controls
 versus represent genuine architectural gaps; the output file paths; and
-the top fixes ranked by severity, exploitability, and blast radius.
+the top fixes ranked by severity, exploitability, and blast radius; and
+the `needs_validation` items, each with its unresolved fact and safe check
+(no severity).
 
 If no threats are found in a category or at all, state that plainly
 rather than omitting the category. Do not declare the repository secure
@@ -347,3 +385,22 @@ outside the trust-zone model.
 Do not modify the implementation or silently remediate findings. Return
 them for developer review. Independent verification and human approval
 remain separate activities.
+
+## 9. Anti-patterns
+
+1. Entering a threat because a category or checklist line matches, with
+   no named flow, principal, and concrete result.
+2. Registering defense-in-depth advice as a threat when another layer
+   already stops the attack.
+3. Guessing proxy, gateway, browser, identity, or deployment behaviour
+   that the repository does not show.
+4. Counting self-impact, or an actor's own legitimate authority, as a
+   boundary crossing.
+5. Rating a threat above the impact you demonstrated, or hiding an
+   unresolved fact inside a conditional severity.
+6. Putting a `needs_validation` item in the register or CSV, or giving
+   it a severity.
+7. Copying a claim from this skill's checklist or from another
+   repository's findings instead of citing this repository's flow.
+8. Padding a category with low-value threats. If none were found, say
+   so plainly.

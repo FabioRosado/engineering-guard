@@ -44,6 +44,19 @@ rejects a `CHANGES` verdict that cannot cite one. Lower-severity or
 pre-existing findings belong under a `PASS` verdict, with the living
 register (not this file) as their permanent record.
 
+## Evidence bar
+
+Apply the evidence bar, defense-in-depth rule and `needs_validation` model
+in `../../stride/SKILL.md` §4 and `../../security/SKILL.md` §5 to §7. A
+`FINDING:` line is for a threat that meets the evidence bar. A
+`needs_validation` item has no severity, so it goes in the living report's
+Architecture Observations (never the register or CSV) and is mentioned in
+prose under `VERDICT: PASS`, with no `FINDING:` line. It never supports
+`CHANGES`: a review whose only concerns are `needs_validation` items is a
+`PASS`. A finding you raised in an earlier round that you now judge to rest
+on an unresolved fact is restated under the `findings.md` rules and
+described in prose as moved to `needs_validation`.
+
 ## Findings and BLOCKED
 
 Your finding prefix is `stride`. Follow `findings.md` (in this folder) for the `FINDING:` line format, id reuse across rounds, and the `BLOCKED` verdict.

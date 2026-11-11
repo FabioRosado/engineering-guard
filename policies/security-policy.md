@@ -41,10 +41,23 @@ security risks, not to maximise the number of findings.
 
 - Investigate suspicious patterns before reporting them
   as confirmed vulnerabilities.
-- Separate confirmed weaknesses, potential vulnerabilities,
+- Separate confirmed weaknesses, `needs_validation` items,
   static-analysis warnings, and optional hardening advice.
+- Confirm a weakness only when the lower-trust principal, the
+  input it controls, the control meant to stop it, the boundary
+  crossed, the affected resource, and a concrete result are all
+  established. A missing best practice, guessed deployment
+  behavior, or self-impact is not a finding.
+- If another layer already stops the attack, a missing second
+  layer is a hardening note, not a vulnerability.
+- A `needs_validation` item names one exact unresolved fact and
+  a safe local or owner-observed check. It carries no severity
+  and is kept separate from hardening advice.
 - Assess severity using realistic impact, exploitability,
   exposure, attacker prerequisites, and existing controls.
+  Severity cannot exceed demonstrated impact. Do not use a
+  conditional severity for something that depends on an
+  unobserved fact.
 - Report confidence separately from severity.
 - Do not claim exploitability or successful reproduction
   without supporting evidence.
@@ -61,6 +74,9 @@ security risks, not to maximise the number of findings.
   without explicit authorization.
 - Keep exploit demonstrations and potentially destructive
   security tests inside authorized, disposable environments.
+- Run target code only in a sandbox with no network, an
+  allowlisted environment, and resource limits; otherwise
+  report `needs_validation`.
 - Do not expose credentials, tokens, secrets, or sensitive
   user data in reports or tool output.
 - Redact sensitive values and identify affected locations
