@@ -252,8 +252,9 @@ an earlier decision on the developer's instruction and should be confirmed in Al
   against `base` plus untracked files); auditors and reviewers read that snapshot.
 - New commands: `spec-feedback` (persists feedback as `spec-feedback-N.md`, returns
   the job to `spec`), `archive` (closes an approved `needs-human` job into the
-  Archive, used by `approve` and the dashboard), `abandon` (terminal `abandoned`
-  stage, frees the one-active-job rule), `resume` (prints the next step), and
+  Archive as terminal `complete`, used by `approve` and the dashboard; it first shared
+  `abandoned`, which read as a failure), `abandon` (terminal `abandoned`
+  stage for a job stopped without finishing, frees the one-active-job rule), `resume` (prints the next step), and
   `close-round`; `round-status` no longer changes the stage (it only saves
   reviewer progress for the dashboard).
 - Verdicts are per role: only UX/UI may be `N/A`; `CHANGES` needs a body.

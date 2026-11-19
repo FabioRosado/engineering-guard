@@ -66,6 +66,30 @@ def _job_key(job):
     return (job.get("repo_path") or job.get("repository") or "", job["id"])
 
 
+def _board_identity(job):
+    """The real path of the job's board.json, or None when it cannot be resolved.
+
+    A worktree can reach the main checkout's `.factory` through a symlink, so one board shows up
+    under two repo_paths. Resolving the file tells such aliases apart from two genuinely
+    different repositories, which keep distinct boards.
+    """
+    repo_path = job.get("repo_path")
+    if not repo_path:
+        return None
+    board = os.path.join(repo_path, ".factory", "board.json")
+    return os.path.realpath(board) if os.path.isfile(board) else None
+
+
+def _same_job(job, other):
+    """True when both entries are one board job: same id, and same (repo_path, id) or same board file."""
+    if job["id"] != other["id"]:
+        return False
+    if _job_key(job) == _job_key(other):
+        return True
+    identity = _board_identity(job)
+    return identity is not None and identity == _board_identity(other)
+
+
 _FACTORY_BOARD = None
 
 
@@ -366,7 +390,12 @@ class JobServer(http.server.SimpleHTTPRequestHandler):
 
         try:
             factory = factory_board.Factory(Path(stored["repo_path"]))
-            job = getattr(factory, action)(job_id, reason, push=False)
+            # The board is the source of truth. If it already closed this job (an archive from
+            # another path to the same board, or a push the server missed), the dashboard entry
+            # is stale: adopt the board's state instead of closing a second time.
+            job = factory.find_job(factory.load_board(), job_id)
+            if job["stage"] not in factory_board.TERMINAL_STAGES:
+                job = getattr(factory, action)(job_id, reason, push=False)
         except factory_board.FactoryError as error:
             self._send_json({"error": str(error)}, status=400)
             return
@@ -380,8 +409,14 @@ class JobServer(http.server.SimpleHTTPRequestHandler):
         job["repo_path"] = stored["repo_path"]
         job["worktree_path"] = stored.get("worktree_path", stored["repo_path"])
         job["files"] = stored.get("files", {})
+        # Like a sync, keep events out of the JSON mirror and store them in SQLite. The close
+        # event is often exactly what a missed push never delivered; record_events is
+        # idempotent, so replaying the board's whole list is safe.
+        events = job.pop("events", [])
         _upsert_job(job)
-        self._send_json({"status": "ok", "job": job})
+        response = {"status": "ok", "job": job}
+        response.update(self._store_job_events(job, events))
+        self._send_json(response)
 
     def _store_job_events(self, job, events):
         """Store a job's events; return the response fields that say whether that worked."""
@@ -520,7 +555,7 @@ def _load_archive():
         return []
 
 
-ARCHIVED_STAGES = ("abandoned",)
+ARCHIVED_STAGES = ("complete", "abandoned")
 
 
 def _upsert_job(job):
@@ -536,22 +571,20 @@ def _upsert_job(job):
     jobs = _load_jobs()
     key = _job_key(job)
 
+    if job["stage"] in ARCHIVED_STAGES:
+        # Move terminal jobs into the archive store instead of growing data.json forever. The
+        # same job seen under another path to the same board leaves In Progress too.
+        if "completed_at" not in job:
+            job["completed_at"] = datetime.now(timezone.utc).isoformat()
+        _write_json_atomic(DATA_FILE, {"jobs": [j for j in jobs if not _same_job(j, job)]})
+        _append_to_archive(job)
+        return
+
     existing_index = None
     for i, j in enumerate(jobs):
         if _job_key(j) == key:
             existing_index = i
             break
-
-    if job["stage"] == "abandoned" and "completed_at" not in job:
-        job["completed_at"] = datetime.now(timezone.utc).isoformat()
-
-    if job["stage"] in ARCHIVED_STAGES:
-        # Move terminal jobs into the archive store instead of growing data.json forever.
-        if existing_index is not None:
-            jobs.pop(existing_index)
-        _write_json_atomic(DATA_FILE, {"jobs": jobs})
-        _append_to_archive(job)
-        return
 
     if existing_index is not None:
         jobs[existing_index] = job
@@ -562,16 +595,19 @@ def _upsert_job(job):
 
 
 def _append_to_archive(job):
-    """Insert or update a job in the archive store, keyed the same way as in-progress jobs."""
+    """Insert or update a job in the archive store, replacing any entry for the same board job."""
     archive = _load_archive()
-    key = _job_key(job)
-    for i, j in enumerate(archive):
-        if _job_key(j) == key:
-            archive[i] = job
-            break
-    else:
-        archive.append(job)
-    _write_json_atomic(ARCHIVE_FILE, {"jobs": archive})
+    merged = []
+    replaced = False
+    for existing in archive:
+        if not _same_job(existing, job):
+            merged.append(existing)
+        elif not replaced:
+            merged.append(job)
+            replaced = True
+    if not replaced:
+        merged.append(job)
+    _write_json_atomic(ARCHIVE_FILE, {"jobs": merged})
 
 
 def _cleanup_archive():

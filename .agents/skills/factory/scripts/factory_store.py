@@ -10,7 +10,6 @@ design of its own. SQL always uses bound parameters; no caller-supplied text is 
 """
 
 import os
-import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +23,7 @@ DEFAULT_TASK_STATUS = TASK_STATUSES[0]
 
 # Stages in which the job waits for a person; everything else is the factory working.
 HUMAN_STAGES = frozenset({"spec-review", "needs-human"})
-TERMINAL_STAGES = frozenset({"abandoned"})
+TERMINAL_STAGES = frozenset({"complete", "abandoned"})
 
 # Agents spawned by each stage entry. The quality gate is a script the board runs itself, not an
 # agent, and the human stages spawn nothing. Reviewers: security, ux, ui, code, architecture.

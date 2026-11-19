@@ -1,5 +1,7 @@
+import atexit
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -9,6 +11,36 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOARD_SCRIPT = PROJECT_ROOT / ".agents" / "skills" / "factory" / "scripts" / "factory_board.py"
+
+
+_FIXTURE_REPOSITORY = None
+
+
+def fixture_repository():
+    """Build the one-commit repository once per test run; each test then copies it.
+
+    Creating it afresh for every test cost five git processes (one a gpg signing run when the
+    user's global config signs commits) across hundreds of tests.
+    """
+    global _FIXTURE_REPOSITORY
+    if _FIXTURE_REPOSITORY is None:
+        root = Path(tempfile.mkdtemp(prefix="engineering-guard-factory-template-"))
+        atexit.register(shutil.rmtree, root, ignore_errors=True)
+        repo = root / "repo"
+        repo.mkdir()
+
+        def git(*arguments):
+            subprocess.run(["git", *arguments], cwd=repo, check=True, capture_output=True, text=True)
+
+        git("init", "--quiet")
+        git("config", "user.email", "factory@example.com")
+        git("config", "user.name", "Factory Test")
+        git("config", "commit.gpgsign", "false")
+        (repo / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+        git("add", "app.py")
+        git("commit", "--quiet", "-m", "initial")
+        _FIXTURE_REPOSITORY = repo
+    return _FIXTURE_REPOSITORY
 
 
 class FactoryBoardHarness:
@@ -21,13 +53,7 @@ class FactoryBoardHarness:
     def setUp(self):
         self.temp_directory = tempfile.TemporaryDirectory(prefix="engineering-guard-factory-")
         self.repo = Path(self.temp_directory.name) / "repo"
-        self.repo.mkdir()
-        self.git("init", "--quiet")
-        self.git("config", "user.email", "factory@example.com")
-        self.git("config", "user.name", "Factory Test")
-        (self.repo / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-        self.git("add", "app.py")
-        self.git("commit", "--quiet", "-m", "initial")
+        shutil.copytree(fixture_repository(), self.repo, symlinks=True)
 
     def tearDown(self):
         self.temp_directory.cleanup()
@@ -629,11 +655,44 @@ class FactoryBoardTests(FactoryBoardHarness, unittest.TestCase):
         self.factory("decision", job_id)
 
         job = self.factory("archive", job_id)
-        self.assertEqual(job["stage"], "abandoned")
+        self.assertEqual(job["stage"], "complete")
         self.assertEqual(job["warnings"], ["archived: approved"])
         self.assertEqual(job["history"][-1]["archived_from"], "needs-human")
+        self.assertNotIn("abandoned_from", job["history"][-1])
         self.assertIn("nothing", self.factory("resume", job_id)["next"])
-        self.assertIn("already abandoned", self.factory("archive", job_id, "again", expect_error=True))
+        self.assertIn("already complete", self.factory("archive", job_id, "again", expect_error=True))
+        # A completed job cannot be turned into an abandoned one.
+        self.assertIn("already complete", self.factory("abandon", job_id, "oops", expect_error=True))
+        self.assertEqual(self.factory("resume", job_id)["job"]["stage"], "complete")
+
+    def test_abandoning_an_approved_job_still_ends_abandoned_not_complete(self):
+        job_id = self.job_in_review()
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.close_round_to_approver(job_id, 1)
+        self.job_file(job_id, "decision.md", "ESCALATE\n\nReady for approval.\n")
+        self.factory("decision", job_id)
+
+        job = self.factory("abandon", job_id, "changed my mind")
+
+        self.assertEqual(job["stage"], "abandoned")
+        self.assertEqual(job["history"][-1]["abandoned_from"], "needs-human")
+        self.assertIn("already abandoned", self.factory("archive", job_id, expect_error=True))
+
+    def test_a_complete_job_no_longer_blocks_the_next_build(self):
+        job_id = self.job_in_review()
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.close_round_to_approver(job_id, 1)
+        self.job_file(job_id, "decision.md", "ESCALATE\n\nReady for approval.\n")
+        self.factory("decision", job_id)
+        self.factory("archive", job_id)
+        self.git("checkout", "--", "app.py")  # the human committed or discarded the build
+
+        second = self.factory("new", "Export CSV")["id"]
+        for name in ("feature.md", "prompt.md", "spec.md"):
+            self.job_file(second, name, "x\n")
+        self.factory("spec-written", second)
+
+        self.assertEqual(self.factory("approve-spec", second)["stage"], "build")
 
     def test_record_model_rejects_unknown_stages(self):
         job_id = self.factory("new", "Add rate limiting")["id"]
@@ -847,6 +906,25 @@ class FactoryBoardTests(FactoryBoardHarness, unittest.TestCase):
         self.assertIsNone(rework["quality_gate"])
         self.gate_fix_build(job_id, "VALUE = 6\n")
         self.assertEqual(self.factory("show", job_id)["stage"], "test-audit")
+
+
+class StageListsAgreeTests(unittest.TestCase):
+    """The dashboard keeps its own copy of the stage list; nothing else notices if the two drift."""
+
+    def test_the_dashboard_stage_list_matches_the_boards_pipeline_stages(self):
+        import importlib.util
+        import re
+
+        spec = importlib.util.spec_from_file_location("factory_board_stage_list", BOARD_SCRIPT)
+        board = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(board)
+
+        source = (PROJECT_ROOT / "ui" / "src" / "lib" / "jobs.js").read_text(encoding="utf-8")
+        block = re.search(r"export const STAGES = \[(.*?)\n\];", source, re.DOTALL).group(1)
+        dashboard = re.findall(r'\["([^"]+)", "([^"]+)"\]', block)
+
+        self.assertEqual(dashboard, list(board.PIPELINE_STAGES))
+        self.assertIn("complete", dict(board.PIPELINE_STAGES))
 
 
 if __name__ == "__main__":

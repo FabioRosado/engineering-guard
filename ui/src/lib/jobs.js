@@ -13,6 +13,7 @@ export const STAGES = [
   ["quality-gate", "Quality Gate"],
   ["approver", "Approver"],
   ["needs-human", "Needs Human"],
+  ["complete", "Complete"],
   ["abandoned", "Abandoned"],
 ];
 
@@ -31,13 +32,42 @@ export function isWaitingOnHuman(job) {
 }
 
 // Mirrors the board's TERMINAL_STAGES: a job in one of these is already closed, so the board
-// refuses to abandon it again.
-const CLOSED_STAGES = new Set(["abandoned"]);
+// refuses to close it again.
+const CLOSED_STAGES = new Set(["complete", "abandoned"]);
+
+export function isClosed(job) {
+  return Boolean(job) && CLOSED_STAGES.has(job.stage);
+}
 
 // Any job still moving through the pipeline can be abandoned, whether it is building, in review
-// or waiting on a human. Archived jobs (which share the closed stage) cannot.
+// or waiting on a human. Closed jobs (complete or abandoned) cannot.
 export function canAbandon(job) {
-  return Boolean(job) && !CLOSED_STAGES.has(job.stage);
+  return Boolean(job) && !isClosed(job);
+}
+
+// Jobs closed before the `complete` stage existed are stored as `abandoned` with an
+// `archived_from` history entry (set by the board's archive command). The key is checked, not the
+// reason text, so an abandon reason that mentions "archived_from" is not mistaken for one.
+function isLegacyComplete(job) {
+  return (
+    job?.stage === "abandoned" &&
+    Array.isArray(job.history) &&
+    job.history.some((entry) => entry !== null && typeof entry === "object" && "archived_from" in entry)
+  );
+}
+
+// The stage a job counts as. Stored data is never rewritten; the old records are read as complete.
+export function effectiveStage(job) {
+  return isLegacyComplete(job) ? "complete" : job?.stage;
+}
+
+// What a card or viewer prints for a job's stage: the two outcomes get their names, every open
+// stage keeps its board name.
+export function stageLabel(job) {
+  const stage = effectiveStage(job);
+  if (stage === "complete") return "Complete";
+  if (stage === "abandoned") return "Abandoned";
+  return stage;
 }
 
 export function isHumanStage(stageKey) {
@@ -48,10 +78,10 @@ export function groupByStage(jobs) {
   const columns = STAGES.map(([key, name]) => ({
     key,
     name,
-    jobs: jobs.filter((job) => job.stage === key),
+    jobs: jobs.filter((job) => effectiveStage(job) === key),
   }));
   const known = new Set(STAGES.map(([key]) => key));
-  const unknown = jobs.filter((job) => !known.has(job.stage));
+  const unknown = jobs.filter((job) => !known.has(effectiveStage(job)));
   if (unknown.length) columns.push({ key: "unknown", name: "Unknown Stage", jobs: unknown });
   return columns;
 }

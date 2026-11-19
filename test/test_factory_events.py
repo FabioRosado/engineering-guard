@@ -55,6 +55,17 @@ class StageEventTests(FactoryBoardHarness, unittest.TestCase):
 
         self.assertEqual(self.stages(job_id), ["spec", "abandoned"])
 
+    def test_archiving_a_job_records_the_complete_stage(self):
+        job_id = self.job_in_review()
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.close_round_to_approver(job_id, 1)
+        self.job_file(job_id, "decision.md", "ESCALATE\n\nReady.\n")
+        self.factory("decision", job_id)
+
+        self.factory("archive", job_id)
+
+        self.assertEqual(self.stages(job_id)[-2:], ["needs-human", "complete"])
+
     def test_a_job_created_before_events_existed_starts_recording_from_its_current_stage(self):
         job_id = self.factory("new", "Add rate limiting")["id"]
         board_path = self.repo / ".factory" / "board.json"

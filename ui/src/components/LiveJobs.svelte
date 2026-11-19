@@ -1,11 +1,11 @@
 <script>
-  import { isWaitingOnHuman } from "../lib/jobs.js";
+  import { isClosed, isWaitingOnHuman } from "../lib/jobs.js";
   import { jobKey } from "../lib/store.svelte.js";
 
   let { jobs, onopen } = $props();
 
   // Archived jobs are not live; the strip shows what the factory is doing right now.
-  let running = $derived(jobs.filter((job) => job.stage !== "abandoned"));
+  let running = $derived(jobs.filter((job) => !isClosed(job)));
 </script>
 
 <section class="live" aria-label="Running factory jobs">

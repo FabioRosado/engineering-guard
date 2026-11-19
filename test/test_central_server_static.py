@@ -51,7 +51,7 @@ class StaticServingTests(unittest.TestCase):
         socketserver.TCPServer.allow_reuse_address = True
         self.httpd = socketserver.TCPServer(("127.0.0.1", 0), self.module.JobServer)
         self.port = self.httpd.server_address[1]
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self.thread.start()
 
     def tearDown(self):

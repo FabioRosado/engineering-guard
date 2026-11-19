@@ -80,13 +80,15 @@ Add a system-wide factory dashboard that aggregates job state from all active re
   - Reviewer chips (PASS/CHANGES/N/A/pending)
   - Warnings (e.g., test audit failed but approved)
 - Clicking card opens a modal. A top bar switches between Overview, Stats, Notes, Documents (root files) and one scope per round; a sidebar lists only the files of the current Documents or Round scope, so Overview, Stats and Notes use the full width
-- The modal's Archive job button closes an approved needs-human job without
+- The modal's Archive job button closes an approved needs-human job as `complete` without
   leaving the dashboard (no copied shell command)
 - The modal's Abandon button stops a job at any open stage (build, review, ...) and moves it
   to the Archive tab. It lives in the modal, not on the card: a card is one button, and a
   destructive action should not sit one mis-click away on a dense board. A reason is required
-  and recorded in the job history; worktree changes are left alone. Archived jobs have no Abandon.
-- Stage columns: spec → spec-review → build → test-audit → review → stride-review → approver → needs-human → abandoned
+  and recorded in the job history; worktree changes are left alone. Closed jobs (`complete` or `abandoned`) have no Abandon.
+- Closing reads the repository's board first. If the board already closed the job, the dashboard adopts the board's stage (it never closes twice or rewrites the outcome) and the stale entry moves to the Archive. Jobs are the same job when their ids match and their `.factory/board.json` resolve to one file, so a worktree that symlinks `.factory` does not leave a second In Progress entry or a duplicate Archive entry; without a resolvable board file, identity stays `(repo_path, id)`.
+- Stored jobs closed before `complete` existed (`abandoned` with an `archived_from` history entry) are displayed as Complete and are not migrated.
+- Stage columns: spec → spec-review → build → test-audit → review → stride-review → approver → needs-human → complete → abandoned
 - Markdown rendering: inline renderer (same as per-repo dashboard)
 - Repository grouping (decided D14, first option):
   - Cards grouped under repository name header

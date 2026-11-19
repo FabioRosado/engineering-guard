@@ -1,4 +1,5 @@
 <script>
+  import { stageLabel } from "../lib/jobs.js";
   import { promptPreview } from "../lib/tasks.js";
 
   let { task, linkedJob, onopen, ondragstart } = $props();
@@ -25,7 +26,7 @@
     <span class="task-link" title="Linked factory job">
       <svg class="icon" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3A4 4 0 0 0 11 18.7l1-1"/></svg>
       <span class="task-link-id">{linkedJob.id}</span>
-      <span class="task-link-stage">{linkedJob.stage}</span>
+      <span class="task-link-stage">{stageLabel(linkedJob)}</span>
     </span>
   {/if}
 </button>

@@ -9,6 +9,7 @@ port with its data directory redirected to a temporary folder, so the real
 import http.client
 import importlib.util
 import json
+import os
 import socketserver
 import sys
 import tempfile
@@ -50,7 +51,7 @@ class CentralServerHarness:
         socketserver.TCPServer.allow_reuse_address = True
         self.httpd = socketserver.TCPServer(("127.0.0.1", 0), self.module.JobServer)
         self.port = self.httpd.server_address[1]
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self.thread.start()
 
     def tearDown(self):
@@ -126,6 +127,15 @@ class JobSyncTests(CentralServerHarness, unittest.TestCase):
         self.assertEqual(job["id"], "001-first")
         self.assertIn("completed_at", job)
 
+    def test_a_complete_job_moves_to_the_archive_with_a_completion_time(self):
+        self.sync(stage="needs-human")
+        self.sync(stage="complete")
+
+        self.assertEqual(self.in_progress(), [])
+        [job] = self.archived()
+        self.assertEqual(job["stage"], "complete")
+        self.assertIn("completed_at", job)
+
     def test_an_archived_job_is_not_duplicated_by_a_later_sync(self):
         self.sync(stage="abandoned")
         self.sync(stage="abandoned")
@@ -173,6 +183,16 @@ class ArchiveCleanupTests(CentralServerHarness, unittest.TestCase):
         self.module._cleanup_archive()
 
         self.assertEqual([job["id"] for job in self.archived()], ["002-recent"])
+
+    def test_a_complete_job_is_kept_for_the_retention_period_from_its_completion(self):
+        # A board job has no completed_at; the server must stamp one for `complete` too, or the
+        # cleanup would read the job as created long ago and delete it at once.
+        created = (datetime.now(timezone.utc) - timedelta(days=self.module.ARCHIVE_RETENTION_DAYS + 5))
+        self.sync(job_id="001-old-job", stage="complete", created=created.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+        self.module._cleanup_archive()
+
+        self.assertEqual([job["id"] for job in self.archived()], ["001-old-job"])
 
     def test_a_job_without_completed_at_falls_back_to_its_creation_time(self):
         # The board writes `created`, not `created_at`; the fallback must use the real field name
@@ -409,8 +429,6 @@ class NoteEndpointTests(CentralServerHarness, unittest.TestCase):
         self.assertEqual(self.request("DELETE", f"/api/notes/{note['id']}")[0], 404)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class AbandonThroughTheBoardTests(CentralServerHarness, BoardHarness, unittest.TestCase):
@@ -466,3 +484,242 @@ class AbandonThroughTheBoardTests(CentralServerHarness, BoardHarness, unittest.T
         self.assertEqual(self.abandon(job_id, "first")[0], 200)
         # The job now lives in the archive, so the server no longer finds it as open.
         self.assertEqual(self.abandon(job_id, "again")[0], 404)
+
+
+class AliasedBoardTests(CentralServerHarness, unittest.TestCase):
+    """One board seen under two paths (a worktree whose `.factory` is a symlink) is one job."""
+
+    def make_repo(self, name):
+        path = Path(self.temp.name) / name
+        (path / ".factory").mkdir(parents=True)
+        (path / ".factory" / "board.json").write_text('{"jobs": []}', encoding="utf-8")
+        return str(path)
+
+    def make_worktree_sharing(self, repo, name="worktree"):
+        path = Path(self.temp.name) / name
+        path.mkdir()
+        os.symlink(Path(repo) / ".factory", path / ".factory")
+        return str(path)
+
+    def test_a_terminal_sync_removes_the_in_progress_entry_seen_under_another_path_to_the_same_board(self):
+        main = self.make_repo("main")
+        worktree = self.make_worktree_sharing(main)
+        self.sync(repo=main, stage="needs-human")
+        self.sync(repo=worktree, stage="needs-human")
+        self.assertEqual(len(self.in_progress()), 2)
+
+        self.sync(repo=main, stage="complete")
+
+        self.assertEqual(self.in_progress(), [])
+        [job] = self.archived()
+        self.assertEqual(job["repo_path"], main)
+
+    def test_a_terminal_sync_under_the_alias_replaces_the_archive_entry_instead_of_adding_one(self):
+        main = self.make_repo("main")
+        worktree = self.make_worktree_sharing(main)
+        self.sync(repo=main, stage="complete")
+        self.sync(repo=worktree, stage="needs-human")
+
+        self.sync(repo=worktree, stage="complete")
+
+        self.assertEqual(self.in_progress(), [])
+        [job] = self.archived()
+        self.assertEqual(job["repo_path"], worktree)
+
+    def test_the_same_id_in_different_repositories_stays_separate_even_when_both_have_boards(self):
+        alpha = self.make_repo("alpha")
+        beta = self.make_repo("beta")
+        self.sync(repo=alpha, stage="needs-human")
+        self.sync(repo=beta, stage="needs-human")
+
+        self.sync(repo=alpha, stage="complete")
+
+        self.assertEqual([job["repo_path"] for job in self.in_progress()], [beta])
+        self.assertEqual([job["repo_path"] for job in self.archived()], [alpha])
+
+        self.sync(repo=beta, stage="abandoned")
+        self.assertEqual(sorted(job["repo_path"] for job in self.archived()), sorted([alpha, beta]))
+
+    def test_different_jobs_on_one_board_stay_separate_when_one_of_them_closes(self):
+        # Every real repository has a board, so the alias rule must never join two different ids.
+        repo = self.make_repo("shared")
+        self.sync(job_id="001-first", repo=repo, stage="needs-human")
+        self.sync(job_id="002-second", repo=repo, stage="needs-human")
+
+        self.sync(job_id="001-first", repo=repo, stage="complete")
+
+        self.assertEqual([job["id"] for job in self.in_progress()], ["002-second"])
+        self.assertEqual([job["id"] for job in self.archived()], ["001-first"])
+
+        self.sync(job_id="002-second", repo=repo, stage="abandoned")
+
+        self.assertEqual(self.in_progress(), [])
+        self.assertEqual(sorted(job["id"] for job in self.archived()), ["001-first", "002-second"])
+
+    def test_paths_without_a_board_file_keep_the_repo_path_identity(self):
+        self.sync(repo="/work/alpha", stage="needs-human")
+        self.sync(repo="/work/beta", stage="needs-human")
+
+        self.sync(repo="/work/alpha", stage="complete")
+
+        self.assertEqual([job["repo_path"] for job in self.in_progress()], ["/work/beta"])
+
+    def test_non_terminal_syncs_under_two_paths_stay_two_entries(self):
+        main = self.make_repo("main")
+        worktree = self.make_worktree_sharing(main)
+        self.sync(repo=main, stage="build")
+        self.sync(repo=worktree, stage="review")
+        self.assertEqual(sorted(job["stage"] for job in self.in_progress()), ["build", "review"])
+
+
+class ClosingStaleEntriesTests(CentralServerHarness, BoardHarness, unittest.TestCase):
+    """The dashboard's close buttons against a real board whose job the board already closed."""
+
+    def setUp(self):
+        CentralServerHarness.setUp(self)
+        BoardHarness.setUp(self)
+
+    def tearDown(self):
+        BoardHarness.tearDown(self)
+        CentralServerHarness.tearDown(self)
+
+    def job_in_needs_human(self):
+        job_id = self.job_in_review()
+        self.write_reviews(job_id, 1, {"security": "PASS", "ux": "N/A", "ui": "N/A", "code": "PASS"})
+        self.close_round_to_approver(job_id, 1)
+        self.job_file(job_id, "decision.md", "ESCALATE\n\nReady for approval.\n")
+        self.factory("decision", job_id)
+        return job_id
+
+    def mirror(self, job_id, repo, stage="needs-human"):
+        self.sync(job_id=job_id, repo=str(repo), stage=stage, files={"spec.md": "# Spec"})
+
+    def board_job(self, job_id):
+        board = json.loads((self.repo / ".factory" / "board.json").read_text(encoding="utf-8"))
+        return next(job for job in board["jobs"] if job["id"] == job_id)
+
+    def close(self, action, job_id, repo, reason=""):
+        return self.request("POST", f"/api/jobs/{action}", {"id": job_id, "repo_path": str(repo), "reason": reason})
+
+    def test_archiving_from_the_dashboard_completes_the_job(self):
+        job_id = self.job_in_needs_human()
+        self.mirror(job_id, self.repo)
+
+        status, body = self.close("archive", job_id, self.repo)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["job"]["stage"], "complete")
+        self.assertEqual(self.in_progress(), [])
+        [archived] = self.archived()
+        self.assertEqual((archived["stage"], archived["files"]), ("complete", {"spec.md": "# Spec"}))
+        self.assertIn("completed_at", archived)
+        self.assertEqual(self.board_job(job_id)["stage"], "complete")
+
+    def test_a_stale_entry_for_a_job_the_board_completed_is_cleared_without_changing_the_outcome(self):
+        job_id = self.job_in_needs_human()
+        self.mirror(job_id, self.repo)  # the dashboard last saw needs-human
+        self.factory("archive", job_id)  # the board closed it; the push never arrived
+        before = self.board_job(job_id)
+
+        status, body = self.close("abandon", job_id, self.repo, "stale")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["job"]["stage"], "complete")
+        self.assertEqual(self.in_progress(), [])
+        [archived] = self.archived()
+        self.assertEqual((archived["id"], archived["stage"]), (job_id, "complete"))
+        self.assertIn("completed_at", archived)
+        self.assertEqual(archived["files"], {"spec.md": "# Spec"})
+        after = self.board_job(job_id)
+        self.assertEqual(after["history"], before["history"])
+        self.assertEqual((after["stage"], after["updated"]), ("complete", before["updated"]))
+
+    def test_clearing_a_stale_entry_stores_the_events_the_missed_push_never_delivered(self):
+        job_id = self.job_in_needs_human()
+        board_events = self.board_job(job_id)["events"]
+        # The dashboard last heard the job reach needs-human, then the push for the close was lost.
+        self.sync(job_id=job_id, repo=str(self.repo), stage="needs-human", events=board_events)
+        self.assertFalse(self.store.job_stats(str(self.repo), job_id)["finished"])
+        self.factory("archive", job_id)
+
+        status, body = self.close("abandon", job_id, self.repo, "stale")
+
+        self.assertEqual(status, 200)
+        self.assertIs(body["events_stored"], True)
+        self.assertNotIn("events", body["job"])
+        self.assertNotIn("events", self.archived()[0])
+        stats = self.store.job_stats(str(self.repo), job_id)
+        self.assertTrue(stats["finished"])
+        self.assertEqual(self.store.list_events(str(self.repo), job_id)[-1]["stage"], "complete")
+
+    def test_closing_an_open_job_from_the_dashboard_stores_its_close_event_too(self):
+        job_id = self.job_in_needs_human()
+        self.mirror(job_id, self.repo)
+
+        status, _ = self.close("archive", job_id, self.repo)
+
+        self.assertEqual(status, 200)
+        self.assertNotIn("events", self.archived()[0])
+        self.assertTrue(self.store.job_stats(str(self.repo), job_id)["finished"])
+
+    def test_a_stale_entry_for_a_job_the_board_abandoned_is_cleared_through_archive_too(self):
+        job_id = self.job_in_needs_human()
+        self.mirror(job_id, self.repo)
+        self.factory("abandon", job_id, "crashed")
+
+        status, body = self.close("archive", job_id, self.repo)
+
+        self.assertEqual((status, body["job"]["stage"]), (200, "abandoned"))
+        self.assertEqual(self.in_progress(), [])
+        self.assertEqual([job["stage"] for job in self.archived()], ["abandoned"])
+        self.assertEqual(self.board_job(job_id)["warnings"], ["abandoned: crashed"])
+
+    def test_the_symlinked_worktree_entry_left_behind_by_an_archive_can_be_cleared(self):
+        job_id = self.job_in_needs_human()
+        worktree = Path(self.temp_directory.name) / "worktree"
+        worktree.mkdir()
+        os.symlink(self.repo / ".factory", worktree / ".factory")
+        self.mirror(job_id, self.repo)
+        self.mirror(job_id, worktree)
+        # What the server held after the archive ran from the main checkout: an Archive entry for
+        # the main path while both in-progress entries (one per path to the board) stayed behind.
+        self.factory("archive", job_id)
+        archived = {**self.board_job(job_id), "repository": "repo", "repo_path": str(self.repo),
+                    "worktree_path": str(self.repo), "files": {}, "completed_at": "2026-11-19T10:00:00+00:00"}
+        self.module._append_to_archive(archived)
+        self.assertEqual([job["repo_path"] for job in self.in_progress()], [str(self.repo), str(worktree)])
+
+        status, _ = self.close("abandon", job_id, worktree, "stale")
+
+        self.assertEqual(status, 200)
+        [archived_job] = self.archived()
+        self.assertEqual((archived_job["id"], archived_job["stage"]), (job_id, "complete"))
+        # The main checkout's entry is the same board job, so it left In Progress as well.
+        self.assertEqual(self.in_progress(), [])
+        self.assertEqual(archived_job["repo_path"], str(worktree))
+
+    def test_closing_a_job_the_board_cannot_read_reports_an_error_and_leaves_both_stores_alone(self):
+        job_id = self.job_in_needs_human()
+        self.mirror(job_id, self.repo)
+        (self.repo / ".factory" / "board.json").write_text("{corrupt", encoding="utf-8")
+        before = self.in_progress()
+
+        status, body = self.close("abandon", job_id, self.repo, "stale")
+
+        self.assertEqual(status, 500)
+        self.assertIn("error", body)
+        self.assertEqual(self.in_progress(), before)
+        self.assertEqual(self.archived(), [])
+
+    def test_an_open_job_at_a_later_stage_than_the_dashboard_shows_is_still_abandoned_for_real(self):
+        job_id = self.job_in_needs_human()
+        self.mirror(job_id, self.repo, stage="review")  # stale: the board is already at needs-human
+
+        status, body = self.close("abandon", job_id, self.repo, "wrong approach")
+
+        self.assertEqual((status, body["job"]["stage"]), (200, "abandoned"))
+        self.assertEqual(self.board_job(job_id)["history"][-1]["abandoned_from"], "needs-human")
+
+
+if __name__ == "__main__":
+    unittest.main()

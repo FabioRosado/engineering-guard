@@ -1,7 +1,7 @@
 <script>
   import Chip from "./Chip.svelte";
   import Markdown from "./Markdown.svelte";
-  import { gateVerdict, reviewChips } from "../lib/jobs.js";
+  import { gateVerdict, reviewChips, stageLabel } from "../lib/jobs.js";
   import { splitVerdict } from "../lib/markdown.js";
 
   let { job, handover, decision } = $props();
@@ -19,7 +19,7 @@
 </script>
 
 <div class="overview-status" aria-label="Job status">
-  <span class="round-label">{job.stage}{job.round ? ` · round ${job.round}` : ""}</span>
+  <span class="round-label">{stageLabel(job)}{job.round ? ` · round ${job.round}` : ""}</span>
   {#if job.test_audit}<Chip name="tests" verdict={job.test_audit} />{/if}
   {#each chips as chip (chip.name)}<Chip name={chip.name} verdict={chip.verdict} />{/each}
   {#if job.stride}<Chip name="stride" verdict={job.stride} />{/if}

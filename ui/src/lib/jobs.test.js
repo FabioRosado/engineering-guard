@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   STAGES,
   canAbandon,
+  effectiveStage,
+  isClosed,
   gateVerdict,
   githubIssueLink,
   groupByRepository,
@@ -13,6 +15,7 @@ import {
   orderFiles,
   repositoryName,
   reviewChips,
+  stageLabel,
 } from "./jobs.js";
 
 describe("pipeline stages", () => {
@@ -20,7 +23,7 @@ describe("pipeline stages", () => {
     // Mirrors PIPELINE_STAGES in factory_board.py; a stage missing here would hide jobs.
     expect(STAGES.map(([key]) => key)).toEqual([
       "spec", "spec-review", "build", "test-audit", "review", "stride-review",
-      "quality-gate", "approver", "needs-human", "abandoned",
+      "quality-gate", "approver", "needs-human", "complete", "abandoned",
     ]);
   });
 
@@ -151,17 +154,59 @@ describe("groupScopes", () => {
 
 describe("canAbandon", () => {
   it("allows every stage a job is still moving through", () => {
-    for (const [stage] of STAGES.filter(([key]) => key !== "abandoned")) {
+    for (const [stage] of STAGES.filter(([key]) => key !== "abandoned" && key !== "complete")) {
       expect(canAbandon({ stage }), stage).toBe(true);
     }
   });
 
   it("refuses a job that is already closed, which is also what the Archive tab holds", () => {
     expect(canAbandon({ stage: "abandoned" })).toBe(false);
+    expect(canAbandon({ stage: "complete" })).toBe(false);
   });
 
   it("copes with no job", () => {
     expect(canAbandon(null)).toBe(false);
+  });
+});
+
+describe("complete and abandoned jobs", () => {
+  const legacy = { stage: "abandoned", history: [{ round: 1, archived_from: "needs-human", reason: "approved" }] };
+
+  it("treats both terminal stages as closed and every open stage as not", () => {
+    expect(isClosed({ stage: "complete" })).toBe(true);
+    expect(isClosed({ stage: "abandoned" })).toBe(true);
+    expect(STAGES.filter(([key]) => isClosed({ stage: key })).map(([key]) => key)).toEqual(["complete", "abandoned"]);
+    expect(isClosed(null)).toBe(false);
+  });
+
+  it("labels a complete job Complete", () => {
+    expect(stageLabel({ stage: "complete" })).toBe("Complete");
+  });
+
+  it("reads an old archived record (abandoned with archived_from in its history) as Complete without changing it", () => {
+    const job = structuredClone(legacy);
+    expect(stageLabel(job)).toBe("Complete");
+    expect(effectiveStage(job)).toBe("complete");
+    expect(job).toEqual(legacy);
+  });
+
+  it("labels every other abandoned job Abandoned, even when its reason mentions archived_from", () => {
+    expect(stageLabel({ stage: "abandoned" })).toBe("Abandoned");
+    expect(stageLabel({ stage: "abandoned", history: [] })).toBe("Abandoned");
+    const mentioned = { stage: "abandoned", history: [{ abandoned_from: "build", reason: "archived_from was wrong" }] };
+    expect(stageLabel(mentioned)).toBe("Abandoned");
+    expect(stageLabel({ stage: "abandoned", history: [null, "x"] })).toBe("Abandoned");
+  });
+
+  it("does not relabel an open stage, even one with an archived_from entry", () => {
+    expect(stageLabel({ stage: "build" })).toBe("build");
+    expect(stageLabel({ stage: "needs-human", history: legacy.history })).toBe("needs-human");
+  });
+
+  it("places an old archived record in the Complete column", () => {
+    const columns = groupByStage([legacy, { stage: "abandoned" }]);
+    expect(columns.find((c) => c.key === "complete").jobs).toEqual([legacy]);
+    expect(columns.find((c) => c.key === "abandoned").jobs).toHaveLength(1);
   });
 });
 

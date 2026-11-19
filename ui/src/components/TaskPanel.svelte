@@ -1,5 +1,6 @@
 <script>
   import Notes from "./Notes.svelte";
+  import { stageLabel } from "../lib/jobs.js";
   import { COLUMN_LABELS, jobForTask } from "../lib/tasks.js";
   import { deleteTask, moveTask, updateTask } from "../lib/workspace-api.js";
   import { app, refreshTasks } from "../lib/store.svelte.js";
@@ -112,7 +113,7 @@
     <div class="linked">
       <button type="button" class="linked-open" onclick={() => onopenjob(linkedJob)}>
         <span class="linked-id">{linkedJob.id}</span>
-        <span class="linked-stage">{linkedJob.stage}</span>
+        <span class="linked-stage">{stageLabel(linkedJob)}</span>
       </button>
       <button type="button" class="link-button" onclick={unlink}>Unlink</button>
     </div>

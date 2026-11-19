@@ -8,7 +8,7 @@
   const COPY = {
     archive: {
       title: "Archive",
-      body: "Archiving closes an approved job and moves it to the Archive tab. The reason is recorded in the job history; code changes in the worktree are left untouched.",
+      body: "Archiving closes an approved job as Complete and moves it to the Archive tab. The reason is recorded in the job history; code changes in the worktree are left untouched.",
       placeholder: "e.g. approved: branch, commit message and PR description generated",
       action: "Archive job",
       failure: "Could not archive",

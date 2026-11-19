@@ -120,7 +120,9 @@ FINDING_LINE = re.compile(
 # because a mistyped line would otherwise make a finding vanish from the unresolved list.
 FINDING_PREFIX = re.compile(r"^FINDING:", re.MULTILINE)
 DECISION_HEADER = re.compile(r"^ESCALATE\b")
-TERMINAL_STAGES = ("abandoned",)
+# `complete` is a job the human approved and closed; `abandoned` is one stopped without finishing.
+# Jobs closed before `complete` existed are `abandoned` with an `archived_from` history entry.
+TERMINAL_STAGES = ("complete", "abandoned")
 # Full ordered pipeline, including human-gate and terminal stages, for display
 # surfaces (dashboards) that need every stage rather than just ACTIVE_STAGES.
 # Keep in sync with ui/src/lib/jobs.js's STAGES array and HUMAN_STAGES set, and with
@@ -136,6 +138,7 @@ PIPELINE_STAGES = (
     ("quality-gate", "Quality Gate"),
     ("approver", "Approver"),
     ("needs-human", "Needs Human"),
+    ("complete", "Complete"),
     ("abandoned", "Abandoned"),
 )
 HUMAN_GATE_STAGES = ("spec-review", "needs-human")
@@ -1261,7 +1264,7 @@ class Factory:
         self.save(board, job)
         return job
 
-    def _close(self, job_id, reason, history_key, push=True, allowed_stages=None):
+    def _close(self, job_id, reason, history_key, final_stage, push=True, allowed_stages=None):
         if not reason.strip():
             raise FactoryError(f"{history_key.split('_')[0]} needs a reason")
         board = self.load_board()
@@ -1272,7 +1275,7 @@ class Factory:
             self.require_stage(job, *allowed_stages)
         label = history_key.split("_")[0]
         job["history"].append({"round": job["round"], history_key: job["stage"], "reason": reason.strip()})
-        job["stage"] = "abandoned"
+        job["stage"] = final_stage
         job["warnings"] = [f"{label}: {reason.strip()}"]
         self.save(board, job, push=push)
         return job
@@ -1284,18 +1287,19 @@ class Factory:
         worktree with no way out except hand-editing board.json. Code changes in the
         worktree are left untouched: the human decides whether to keep them.
         """
-        return self._close(job_id, reason, "abandoned_from", push=push)
+        return self._close(job_id, reason, "abandoned_from", "abandoned", push=push)
 
     def archive(self, job_id, reason="approved", push=True):
-        """Close an approved job and move it to the Archive tab.
+        """Close an approved job as `complete` and move it to the Archive tab.
 
         Approval is the human saying the work is ready to commit, so the job no
-        longer needs to sit in needs-human. It shares the terminal `abandoned`
-        stage (the dashboard's archive bucket) but records `archived_from` in
-        history so an approval is distinguishable from a crash cleanup.
+        longer needs to sit in needs-human. It ends in the terminal `complete`
+        stage, apart from `abandoned` (stopped without finishing), and records
+        `archived_from` in history.
         """
         return self._close(
-            job_id, reason or "approved", "archived_from", push=push, allowed_stages=("needs-human",)
+            job_id, reason or "approved", "archived_from", "complete",
+            push=push, allowed_stages=("needs-human",),
         )
 
     def resume(self, job_id):
@@ -1321,7 +1325,8 @@ class Factory:
                 "quality-gate": "run quality-gate-done (the board runs the gate itself; no agent)",
                 "approver": "spawn approver, then decision",
                 "needs-human": "stop: the human reads decision.md and runs approve or rework",
-                "abandoned": "nothing: the job is closed (archived or abandoned)",
+                "complete": "nothing: the job is closed (complete or abandoned)",
+                "abandoned": "nothing: the job is closed (complete or abandoned)",
             }[stage]
             if stage == "needs-human" and not (self.job_directory(job_id) / "decision.md").is_file():
                 # A blocked builder or reviewer parks the job before the approver ever runs, so

@@ -235,7 +235,7 @@ Read `spec.md`, `build.md`, `decision.md`, `git diff <base>` and
 
 Then close the job so it leaves the human queue: `FACTORY archive <id>
 "approved: branch name, commit message and PR description generated"`. This
-moves it to the Archive tab and records the reason; it does not touch code.
+moves it to the Archive tab as `complete` and records the reason; it does not touch code.
 
 Do not run `git commit`, `git push`, `git checkout` or `gh`.
 
@@ -255,12 +255,13 @@ job so it no longer blocks other builds. Code changes stay in the worktree;
 the human decides whether to keep or discard them.
 
 ### `archive <job-id> [reason]`
-`FACTORY archive <id> "<reason>"` closes an approved `needs-human` job and moves
-it to the Archive tab. Used by `approve`; the human can also trigger it from the
+`FACTORY archive <id> "<reason>"` closes an approved `needs-human` job as `complete`
+and moves it to the Archive tab. Used by `approve`; the human can also trigger it from the
 dashboard's Archive job button. Code changes stay in the worktree.
 
-`FACTORY abandon <id> "<reason>"` closes a job at any open stage; the dashboard's
-Abandon button calls the same command.
+`FACTORY abandon <id> "<reason>"` closes a job at any open stage as `abandoned`
+(stopped without finishing); the dashboard's Abandon button calls the same
+command. A job closed either way cannot be closed again.
 
 ## Dashboard
 

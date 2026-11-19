@@ -78,3 +78,17 @@ describe("JobCard repository line", () => {
     expect(target.querySelector(".card-path")).toBeNull();
   });
 });
+
+describe("JobCard stage label", () => {
+  const text = (job) => render(job).target.querySelector(".card-stage").textContent;
+
+  it("shows Complete for a complete job and for an old archived record", () => {
+    expect(text({ ...baseJob, stage: "complete" })).toBe("Complete");
+    expect(text({ ...baseJob, stage: "abandoned", history: [{ archived_from: "needs-human", reason: "approved" }] })).toBe("Complete");
+  });
+
+  it("shows Abandoned for any other abandoned job and the board name for open stages", () => {
+    expect(text({ ...baseJob, stage: "abandoned", history: [{ abandoned_from: "build", reason: "x" }] })).toBe("Abandoned");
+    expect(text({ ...baseJob, stage: "needs-human" })).toBe("needs-human");
+  });
+});

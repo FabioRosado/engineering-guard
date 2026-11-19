@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 import shutil
@@ -15,20 +16,46 @@ GATE_SCRIPT = PROJECT_ROOT / ".agents" / "skills" / "factory" / "scripts" / "qua
 FAKE_AWS_KEY = "AKIA" + "A" * 16
 
 
+_FIXTURE_REPOSITORY = None
+
+
+def fixture_repository():
+    """Build the one-commit repository once per test run; each test then copies it.
+
+    Creating it afresh for every test cost six git processes (one a gpg signing run when the
+    user's global config signs commits) across dozens of tests.
+    """
+    global _FIXTURE_REPOSITORY
+    if _FIXTURE_REPOSITORY is None:
+        root = Path(tempfile.mkdtemp(prefix="engineering-guard-gate-template-"))
+        atexit.register(shutil.rmtree, root, ignore_errors=True)
+        repo = root / "repo"
+        (repo / "tests").mkdir(parents=True)
+
+        def git(*arguments):
+            subprocess.run(["git", *arguments], cwd=repo, check=True, capture_output=True, text=True)
+
+        git("init", "--quiet")
+        git("config", "user.email", "gate@example.com")
+        git("config", "user.name", "Gate Test")
+        git("config", "commit.gpgsign", "false")
+        (repo / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (repo / "tests" / "test_app.py").write_text(
+            "def test_value():\n    assert 1 == 1\n    assert 2 == 2\n", encoding="utf-8"
+        )
+        git("add", ".")
+        git("commit", "--quiet", "-m", "initial")
+        _FIXTURE_REPOSITORY = repo
+    return _FIXTURE_REPOSITORY
+
+
 class GateRepositoryCase(unittest.TestCase):
     """A disposable Git repository and a way to run the real gate script against it."""
 
     def setUp(self):
         self.temp_directory = tempfile.TemporaryDirectory(prefix="engineering-guard-gate-")
         self.repo = Path(self.temp_directory.name) / "repo"
-        self.repo.mkdir()
-        self.git("init", "--quiet")
-        self.git("config", "user.email", "gate@example.com")
-        self.git("config", "user.name", "Gate Test")
-        self.write("app.py", "VALUE = 1\n")
-        self.write("tests/test_app.py", "def test_value():\n    assert 1 == 1\n    assert 2 == 2\n")
-        self.git("add", ".")
-        self.git("commit", "--quiet", "-m", "initial")
+        shutil.copytree(fixture_repository(), self.repo, symlinks=True)
 
     def tearDown(self):
         self.temp_directory.cleanup()

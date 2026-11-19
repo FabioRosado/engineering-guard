@@ -1,7 +1,7 @@
 <script>
   import Chip from "./Chip.svelte";
   import IssueLink from "./IssueLink.svelte";
-  import { gateVerdict, githubIssueLink, isWaitingOnHuman, repositoryName, reviewChips } from "../lib/jobs.js";
+  import { gateVerdict, githubIssueLink, isWaitingOnHuman, repositoryName, reviewChips, stageLabel } from "../lib/jobs.js";
 
   // The grouped view already titles each section with the repository, so it hides the line.
   let { job, onopen, showRepository = true } = $props();
@@ -30,7 +30,7 @@
   {#if repository}
     <span class="card-path" title={job.repo_path || job.worktree_path || repository}>{repository}</span>
   {/if}
-  <span class="card-stage">{job.stage}</span>
+  <span class="card-stage">{stageLabel(job)}</span>
 
   {#if showRound}
     {#if job.test_audit}

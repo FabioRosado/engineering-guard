@@ -218,8 +218,8 @@ session model and the board records `default (fallback)`.
 | `approve <id>` | Suggests a branch name, commit message and PR description that follow the repo's conventions, then archives the job. You commit and push. |
 | `rework <id> <note>` | Send a **needs-human** job back to the builder with your note; the budget resets (two review rounds, one test-audit rebuild). |
 | `resume <id>` | Continue an interrupted job from its current stage. |
-| `archive <id> [reason]` | Close an approved **needs-human** job and move it to Archive. |
-| `abandon <id> <reason>` | Close a job for good, for example after a crash; it stops blocking new builds. Code changes stay in the worktree. |
+| `archive <id> [reason]` | Close an approved **needs-human** job as **Complete** and move it to Archive. |
+| `abandon <id> <reason>` | Close a job for good without finishing it, for example after a crash; it ends **Abandoned** and stops blocking new builds. Code changes stay in the worktree. |
 
 The orchestrator's first step is always to create the job and show you its
 id; it saves your full feature text to `feature.md` for the spec-writer and
@@ -245,8 +245,8 @@ feedback; it is saved as `spec-feedback-N.md`, the spec-writer revises
    `handover.md` (when the job has one), `decision.md`, the reviews, and `git diff`.
 5. Either `rework <id> "<what to change>"`, or `approve <id>` and use the
    suggested branch, commit message and PR description to commit yourself.
-   Approving also archives the job, including the same action from the
-   dashboard's **Archive job** button.
+   Approving also archives the job as **Complete**, including the same action
+   from the dashboard's **Archive job** button.
 
 Commit (or stash) the job's changes before approving the next spec: the next
 build refuses to start on a dirty worktree.
@@ -282,7 +282,7 @@ npm run dashboard
 
 `npm run dashboard` builds the Svelte UI in `ui/` when it is missing or older than its sources (the first run installs its packages, which needs Node.js 20.19+ or 22.12+), then runs the central server in the foreground at <http://localhost:5173/>; stop it with Ctrl-C. There is no per-repository mode: every factory pushes its state to the central server, which is the only source for the dashboard.
 
-Jobs are cards across the stage columns (Pipeline view, which scrolls sideways so every stage stays in order) or grouped by repository (Grouped view); each round shows a `tests` chip followed by reviewer chips (green PASS, amber CHANGES, grey N/A or pending). Jobs waiting on you (spec-review, needs-human) are outlined in teal. Click a card to open the job. A job with a `handover.md` opens on an **Overview** tab: status chips, warnings, the recommendation from `decision.md`, and the handover rendered as a document with its mermaid diagrams drawn. A diagram that cannot be drawn shows a plain error card with its source instead of leaving a gap; a top bar switches between Overview, Stats, Notes, Documents (`spec.md`, `build.md`, ...) and one scope per round (`Round 1`, `Round 2`, ...); the sidebar lists only the files of the selected Documents or Round scope. Jobs from before `handover.md` existed have no Overview and open on their first file. Use **Archive job** in the viewer to close an approved job. Use **Abandon** (shown for every job that is still open, at any stage) to stop a job that is stuck or no longer wanted: it asks for a reason, records it in the job history, moves the job to the Archive tab, and leaves worktree changes untouched.
+Jobs are cards across the stage columns (Pipeline view, which scrolls sideways so every stage stays in order) or grouped by repository (Grouped view); each round shows a `tests` chip followed by reviewer chips (green PASS, amber CHANGES, grey N/A or pending). Jobs waiting on you (spec-review, needs-human) are outlined in teal. Click a card to open the job. A job with a `handover.md` opens on an **Overview** tab: status chips, warnings, the recommendation from `decision.md`, and the handover rendered as a document with its mermaid diagrams drawn. A diagram that cannot be drawn shows a plain error card with its source instead of leaving a gap; a top bar switches between Overview, Stats, Notes, Documents (`spec.md`, `build.md`, ...) and one scope per round (`Round 1`, `Round 2`, ...); the sidebar lists only the files of the selected Documents or Round scope. Jobs from before `handover.md` existed have no Overview and open on their first file. Use **Archive job** in the viewer to close an approved job as Complete. Use **Abandon** (shown for every job that is still open, at any stage) to stop a job that is stuck or no longer wanted: it asks for a reason, records it in the job history, moves the job to the Archive tab, and leaves worktree changes untouched. If the board has already closed the job (for example it was archived from another checkout of the same repository, or the dashboard missed the update), either button just brings the dashboard in line with the board: the entry leaves In Progress, the board's recorded outcome and history are not changed, and no error is shown. Jobs closed before the `complete` stage existed are stored as `abandoned` with an `archived_from` history entry; the dashboard shows them as Complete without rewriting them. One board reached through two paths (a worktree whose `.factory` is a symlink to the main checkout's) is one job in the Archive, not two.
 
 Job markdown is written by agents, so the UI treats it as untrusted: HTML in it is shown as text, scripts and `javascript:` links are removed, and diagrams are drawn in mermaid's strict mode. Keep the server bound to `127.0.0.1`: specs, security reviews and STRIDE's living threat register can describe unfixed vulnerabilities. STRIDE's profile and report live outside `.factory/`, at a separate git-excluded location, so they are not shown by this dashboard.
 
@@ -320,8 +320,8 @@ says why. You normally never call it yourself except for the Claude setup.
 | `accept-suppression <id> <entry> <reason>` | Human only: accepts one loosened check recorded by the gate. |
 | `decision <id>` | `approver` → `needs-human` (needs `ESCALATE`). |
 | `rework <id> "<note>"` | `needs-human` → `build`; also marks `spec.md` approved. |
-| `abandon <id> "<reason>"` | Any stage → `abandoned`. |
-| `archive <id> [reason]` | `needs-human` → `abandoned` (Archive); records `archived_from`. |
+| `abandon <id> "<reason>"` | Any open stage → `abandoned`; records `abandoned_from`. |
+| `archive <id> [reason]` | `needs-human` → `complete` (Archive); records `archived_from`. |
 | `resume <id>` | Prints the next step for the job's current stage. |
 | `record-model <id> <stage> <model>` | Note the model a stage actually ran on (stage must be known). |
 | `show [<id>]` | Print the board or one job. |

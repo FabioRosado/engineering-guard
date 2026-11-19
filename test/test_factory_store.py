@@ -316,6 +316,18 @@ class StatsTests(StoreTestCase):
         self.assertTrue(stats["finished"])
         self.assertNotIn("abandoned", stats["seconds_by_stage"])
 
+    def test_a_complete_job_is_finished_and_stops_the_clock_like_an_abandoned_one(self):
+        self.record(
+            ("needs-human", 1, "2026-10-30T10:00:00Z"),
+            ("complete", 1, "2026-10-30T10:30:00Z"),
+        )
+
+        stats = self.store.job_stats("/work/alpha", "001-first", now="2026-10-31T10:00:00Z")
+
+        self.assertEqual(stats["total_seconds"], 1800)
+        self.assertTrue(stats["finished"])
+        self.assertEqual(stats["seconds_by_stage"], {"needs-human": 1800})
+
     def test_a_running_job_counts_time_up_to_now(self):
         self.record(("build", 1, "2026-10-30T10:00:00Z"))
         stats = self.store.job_stats("/work/alpha", "001-first", now="2026-10-30T10:15:00Z")
