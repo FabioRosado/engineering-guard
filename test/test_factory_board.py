@@ -408,6 +408,69 @@ class FactoryBoardTests(FactoryBoardHarness, unittest.TestCase):
         self.assertEqual(self.factory("new", "--from-backlog")["id"], "002-dark-mode")
         self.assertIn("backlog has no unchecked items", self.factory("new", "--from-backlog", expect_error=True))
 
+    def test_new_stores_a_valid_github_issue_url_on_the_job(self):
+        self.factory("init")
+        url = "https://github.com/anaconda/engineering-guard/issues/123"
+
+        job = self.factory("new", "Fix the thing", "--issue", url)
+
+        self.assertEqual(job["issue_url"], url)
+        board = json.loads((self.repo / ".factory" / "board.json").read_text(encoding="utf-8"))
+        self.assertEqual(board["jobs"][0]["issue_url"], url)
+
+    def test_new_without_an_issue_adds_no_issue_key(self):
+        self.factory("init")
+        self.assertNotIn("issue_url", self.factory("new", "No issue here"))
+        board = json.loads((self.repo / ".factory" / "board.json").read_text(encoding="utf-8"))
+        self.assertNotIn("issue_url", board["jobs"][0])
+
+    def test_new_from_backlog_accepts_an_issue_url(self):
+        self.factory("init")
+        (self.repo / ".factory" / "backlog.md").write_text("- [ ] Export CSV\n", encoding="utf-8")
+        url = "https://github.com/o/r/issues/7"
+
+        job = self.factory("new", "--from-backlog", "--issue", url)
+
+        self.assertEqual((job["title"], job["issue_url"]), ("Export CSV", url))
+
+    def test_new_rejects_anything_but_a_canonical_github_issue_url(self):
+        self.factory("init")
+        backlog = self.repo / ".factory" / "backlog.md"
+        backlog.write_text("- [ ] Export CSV\n", encoding="utf-8")
+        rejected = [
+            "http://github.com/o/r/issues/1",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "https://gitlab.com/o/r/issues/1",
+            "https://www.github.com/o/r/issues/1",
+            "https://GitHub.com/o/r/issues/1",
+            "https://github.com.evil.example/o/r/issues/1",
+            "https://github.com@evil.example/o/r/issues/1",
+            "https://github.com/o/r/pull/1",
+            "https://github.com/o/r/issues/",
+            "https://github.com/o/r/issues/abc",
+            "https://github.com/o/r/issues/0",
+            "https://github.com/o/r/issues/1/",
+            "https://github.com/o/r/issues/1#issuecomment-5",
+            "https://github.com/o/r/issues/1?x=1",
+            "https://github.com/o/r/issues/1/extra",
+            "https://github.com/o/../issues/1",
+            "https://github.com/o//issues/1",
+            " https://github.com/o/r/issues/1",
+            "https://github.com/o/r/issues/1\n",
+            "https://github.com/o/r/issues/1 x",
+            "https://github.com/o/r/issues/1\t",
+            "",
+        ]
+        for url in rejected:
+            with self.subTest(url=url):
+                error = self.factory("new", "--from-backlog", "--issue", url, expect_error=True)
+                self.assertIn("--issue must be a GitHub issue URL", error)
+        board = json.loads((self.repo / ".factory" / "board.json").read_text(encoding="utf-8"))
+        self.assertEqual(board["jobs"], [])
+        self.assertEqual(backlog.read_text(encoding="utf-8"), "- [ ] Export CSV\n")
+        self.assertFalse((self.repo / ".factory" / "jobs").exists() and any((self.repo / ".factory" / "jobs").iterdir()))
+
     def test_models_rejects_presets_the_cli_cannot_run(self):
         error = self.factory("models", "sol-luna", "--cli", "claude", expect_error=True)
         self.assertIn("not available on claude", error)

@@ -21,7 +21,7 @@
       </h2>
       <div class="jobs-grid">
         {#each repositoryJobs as job (jobKey(job))}
-          <JobCard {job} {onopen} />
+          <JobCard {job} {onopen} showRepository={false} />
         {/each}
       </div>
     </section>

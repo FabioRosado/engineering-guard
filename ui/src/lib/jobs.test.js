@@ -3,6 +3,7 @@ import {
   STAGES,
   canAbandon,
   gateVerdict,
+  githubIssueLink,
   groupByRepository,
   groupByStage,
   groupScopes,
@@ -10,6 +11,7 @@ import {
   scopeOf,
   isWaitingOnHuman,
   orderFiles,
+  repositoryName,
   reviewChips,
 } from "./jobs.js";
 
@@ -160,5 +162,69 @@ describe("canAbandon", () => {
 
   it("copes with no job", () => {
     expect(canAbandon(null)).toBe(false);
+  });
+});
+
+describe("githubIssueLink", () => {
+  it("labels a canonical issue URL as owner/repo#number", () => {
+    const url = "https://github.com/anaconda/engineering-guard/issues/123";
+    expect(githubIssueLink({ issue_url: url })).toEqual({
+      href: url,
+      label: "anaconda/engineering-guard#123",
+      repo: "anaconda/engineering-guard",
+      number: "#123",
+    });
+  });
+
+  it("returns null when the job has no issue", () => {
+    expect(githubIssueLink({})).toBeNull();
+    expect(githubIssueLink({ issue_url: null })).toBeNull();
+    expect(githubIssueLink({ issue_url: "" })).toBeNull();
+    expect(githubIssueLink(undefined)).toBeNull();
+  });
+
+  it.each([
+    "javascript:alert(1)",
+    "data:text/html,x",
+    "http://github.com/o/r/issues/1",
+    "https://evil.example/o/r/issues/1",
+    "https://github.com.evil.example/o/r/issues/1",
+    "https://github.com@evil.example/o/r/issues/1",
+    "https://www.github.com/o/r/issues/1",
+    "https://github.com/o/r/pull/1",
+    "https://github.com/o/r/issues/",
+    "https://github.com/o/r/issues/0",
+    "https://github.com/o/r/issues/1/",
+    "https://github.com/o/r/issues/1#issuecomment-2",
+    "https://github.com/o/r/issues/1?x=1",
+    "https://github.com/o/../issues/1",
+    " https://github.com/o/r/issues/1",
+    "https://github.com/o/r/issues/1\n",
+    "https://github.com/o/r/issues/1 x",
+  ])("rejects %j", (url) => {
+    expect(githubIssueLink({ issue_url: url })).toBeNull();
+  });
+
+  it.each([42, {}, ["https://github.com/o/r/issues/1"], true])("rejects the non-string %j", (value) => {
+    expect(githubIssueLink({ issue_url: value })).toBeNull();
+  });
+});
+
+describe("repositoryName", () => {
+  it("prefers the repository the board recorded", () => {
+    expect(repositoryName({ repository: "engineering-guard", repo_path: "/work/other" })).toBe("engineering-guard");
+  });
+
+  it("falls back to the last segment of repo_path, then worktree_path", () => {
+    expect(repositoryName({ repository: "", repo_path: "/Users/me/code/my-repo/" })).toBe("my-repo");
+    expect(repositoryName({ repo_path: "C:\\code\\win-repo" })).toBe("win-repo");
+    expect(repositoryName({ worktree_path: "/tmp/wt/feature-tree" })).toBe("feature-tree");
+  });
+
+  it("returns null when nothing names the repository", () => {
+    expect(repositoryName({})).toBeNull();
+    expect(repositoryName({ repository: "  ", repo_path: "/", worktree_path: null })).toBeNull();
+    expect(repositoryName({ repository: 5, repo_path: 7 })).toBeNull();
+    expect(repositoryName(null)).toBeNull();
   });
 });

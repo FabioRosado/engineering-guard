@@ -170,6 +170,12 @@ alternatives. On Claude Code, then run `FACTORY install-claude`.
 1. `FACTORY new "<short title>"`, a one-line title (≤ 8 words, no backticks,
    quotes or `$`, which the shell would interpret) that you derive from the
    feature. For `next`, use `FACTORY new --from-backlog`. Show the `id`.
+   If the human's message contains a GitHub issue URL, add `--issue '<url>'` (single-quoted),
+   copied verbatim from their text; never infer or build one. The board accepts only
+   `https://github.com/<owner>/<repo>/issues/<number>`: if it rejects the URL, show the error
+   and ask the human for the right one rather than creating the job without it. If the pasted
+   URL contains a quote or any character outside letters, digits, `-`, `_`, `.` and `/` after
+   `https://github.com/`, do not put it in a shell command; ask the human instead.
 2. Save the human's full feature text verbatim to `.factory/jobs/<id>/feature.md`
    with your file-writing tool (not the shell, so fences and backticks
    survive). For `next`, write the backlog item.

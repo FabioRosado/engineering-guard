@@ -731,6 +731,34 @@
     justify-content: space-between;
   }
 
+  .modal-heading { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  /* The link shrinks (its repository part ellipsizes) so the job id and title keep room. */
+  .modal-heading .issue-link { flex: 0 1 auto; max-width: 45%; }
+
+  .issue-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    /* A little vertical padding enlarges the hit area without moving the text. */
+    padding: 4px 0;
+    margin: -4px 0;
+    font-size: 10.5px;
+    line-height: 16px;
+    font-weight: 600;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--muted);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* Only the owner/repo part truncates; the issue number is what tells issues apart. */
+  .issue-link .issue-repo { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .issue-link .issue-num { flex: none; white-space: nowrap; }
+  .issue-link .icon { width: 12px; height: 12px; flex: none; }
+  .issue-link:hover { color: var(--ink); }
+
   .modal-title {
     font-size: 12.5px;
     font-weight: 620;

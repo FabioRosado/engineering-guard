@@ -307,7 +307,7 @@ says why. You normally never call it yourself except for the Claude setup.
 |---------|---------------------|
 | `init` | Create `.factory/`, add the Git exclude, refresh the dashboard. |
 | `models <preset> \| <exp> <cheap> --cli <cli>` | Write `config.json`. |
-| `new "<feature>"` / `new --from-backlog` | Create a job in `spec`. |
+| `new "<feature>"` / `new --from-backlog` [`--issue <url>`] | Create a job in `spec`. `--issue` records a GitHub issue link (`https://github.com/<owner>/<repo>/issues/<number>`, exactly that form: no `http`, other host, pull request, trailing slash, query or fragment; anything else exits 2 and creates no job). The dashboard shows it as an `owner/repo#<number>` link on the card and in the job viewer. |
 | `spec-written <id>` | `spec` → `spec-review` (needs `prompt.md`, `spec.md`). |
 | `spec-feedback <id> "<note>"` | `spec-review` → `spec`; writes `spec-feedback-N.md`. |
 | `approve-spec <id>` | `spec-review` → `build`; marks `spec.md` approved and records the base commit. |

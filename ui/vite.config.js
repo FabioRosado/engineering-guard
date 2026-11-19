@@ -13,6 +13,8 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
   },
+  // Under vitest, resolve Svelte's browser build so components can be mounted in jsdom.
+  resolve: process.env.VITEST ? { conditions: ["browser"] } : undefined,
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.js"],

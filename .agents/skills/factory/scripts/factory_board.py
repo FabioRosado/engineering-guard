@@ -99,6 +99,10 @@ FINDING_FILES = (
     ("architecture", "review-architecture.md"),
     ("stride", "review-stride.md"),
 )
+# The one accepted shape of a job's GitHub issue link. Mirrored by githubIssueLink in ui/src/lib/jobs.js.
+GITHUB_ISSUE_URL = re.compile(
+    r"https://github\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\.{1,2}/)[A-Za-z0-9._-]{1,100}/issues/[1-9][0-9]{0,9}"
+)
 BLOCKED_HEADER = re.compile(r"^BLOCKED\b")
 VERDICT_HEADER = re.compile(r"^VERDICT:\s*(PASS|CHANGES|N/A|BLOCKED)\s*$")
 # One line per finding, written by the reviewer (decision D41). The id is assigned and reused by
@@ -607,8 +611,12 @@ class Factory:
         self.write_json(self.config_path, config)
         return config
 
-    def new(self, title, from_backlog):
+    def new(self, title, from_backlog, issue_url=None):
         self.ensure_initialized()
+        if issue_url is not None and not GITHUB_ISSUE_URL.fullmatch(issue_url):
+            raise FactoryError(
+                "--issue must be a GitHub issue URL like https://github.com/<owner>/<repo>/issues/<number>"
+            )
         if from_backlog:
             title = self.take_backlog_item()
         if not title or not title.strip():
@@ -635,6 +643,8 @@ class Factory:
             "warnings": [],
             "created": utc_now(),
         }
+        if issue_url is not None:
+            job["issue_url"] = issue_url
         board["jobs"].append(job)
         self.save(board, job)
         return job
@@ -1504,6 +1514,7 @@ def build_parser():
     new = commands.add_parser("new")
     new.add_argument("title", nargs="?")
     new.add_argument("--from-backlog", action="store_true")
+    new.add_argument("--issue", help="https://github.com/<owner>/<repo>/issues/<number>")
     for name in (
         "spec-written", "approve-spec", "build-done", "test-audit-done",
         "round-status", "close-round", "stride-review-done", "quality-gate-done", "decision", "resume",
@@ -1541,7 +1552,7 @@ def main(argv=None):
         elif command == "models":
             result = factory.models(arguments.choice, arguments.cli)
         elif command == "new":
-            result = factory.new(arguments.title, arguments.from_backlog)
+            result = factory.new(arguments.title, arguments.from_backlog, arguments.issue)
         elif command == "spec-written":
             result = factory.spec_written(arguments.job_id)
         elif command == "approve-spec":

@@ -66,6 +66,33 @@ export function groupByRepository(jobs) {
   return [...byRepository.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
 
+// Mirrors GITHUB_ISSUE_URL in factory_board.py. Synced jobs are untrusted input, so the dashboard
+// re-checks the value instead of relying on the board having validated it.
+const GITHUB_ISSUE_URL =
+  /^https:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38})\/(?!\.{1,2}\/)([A-Za-z0-9._-]{1,100})\/issues\/([1-9][0-9]{0,9})$/;
+
+// {href, label, repo, number} for a job's GitHub issue, or null when there is none or it is not a canonical
+// github.com issue URL (so it can never put another scheme or host into an href).
+export function githubIssueLink(job) {
+  const url = job?.issue_url;
+  if (typeof url !== "string") return null;
+  const match = GITHUB_ISSUE_URL.exec(url);
+  if (!match) return null;
+  const repo = `${match[1]}/${match[2]}`;
+  return { href: url, label: `${repo}#${match[3]}`, repo, number: `#${match[3]}` };
+}
+
+// The repository a job belongs to: what the board recorded, else the last segment of its path.
+export function repositoryName(job) {
+  if (typeof job?.repository === "string" && job.repository.trim()) return job.repository.trim();
+  for (const path of [job?.repo_path, job?.worktree_path]) {
+    if (typeof path !== "string") continue;
+    const last = path.split(/[\\/]/).filter(Boolean).pop();
+    if (last) return last;
+  }
+  return null;
+}
+
 export function reviewChips(reviews) {
   if (!reviews || Object.keys(reviews).length === 0) return [];
   const chips = [];

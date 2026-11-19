@@ -2,6 +2,7 @@
   import JobStats from "./JobStats.svelte";
   import Markdown from "./Markdown.svelte";
   import Notes from "./Notes.svelte";
+  import IssueLink from "./IssueLink.svelte";
   import Overview from "./Overview.svelte";
   import { canAbandon, groupScopes, initialFile, scopeOf, OVERVIEW, STATS, NOTES } from "../lib/jobs.js";
   import { splitVerdict } from "../lib/markdown.js";
@@ -55,7 +56,10 @@
 </script>
 
 <div class="modal-header">
-  <span class="modal-title">{job.id} — {job.title}</span>
+  <div class="modal-heading">
+    <span class="modal-title">{job.id} — {job.title}</span>
+    <IssueLink {job} />
+  </div>
   <div class="modal-header-actions">
     {#if canAbandon(job)}
       <button class="abandon-btn" type="button" onclick={onabandon}>
