@@ -1,6 +1,6 @@
 # Engineering Guard v0.3
 
-Engineering Guard packages eight reusable agent skills (including a software factory orchestrator) and a policy-delivery hook as a local Codex plugin. The repository also keeps its project-local setup, reusable policies, verification evidence runner, and demos.
+Engineering Guard packages eight reusable agent skills (including a software factory orchestrator) and a policy-delivery hook as a local Codex plugin. The repository also keeps its project-local setup, reusable policies, verification evidence runner, and demos. MIT licensed; see [Contributing](CONTRIBUTING.md).
 
 ## Use with Codex
 
@@ -17,7 +17,7 @@ Start Codex at the repository root, then invoke the skill that matches the work:
 
 Skills live in `.agents/skills/`; project hook definitions are in `.codex/hooks.json`. Codex discovers skills from the repository-local directory. Trust the project through Codex's normal project flow, then review and trust its hooks with `/hooks`. A changed hook definition needs review again.
 
-### Install for personal Codex desktop use
+### Install in Codex desktop
 
 The local marketplace at `.agents/plugins/marketplace.json` exposes the repository root as the Engineering Guard plugin. From this repository root, register that marketplace once:
 
@@ -139,3 +139,12 @@ For work involving several dependent steps, use the client's transient task list
 ## Scope
 
 Engineering Guard is a local package of agent skills usable from Codex, Kilo and Claude Code, with repository-local skills, policies, hooks, scripts, and demos. Its only dependencies are the optional factory diagram validator described above; it adds no MCP integration. Registering the marketplace with `codex plugin marketplace add .` stores a user-level Codex source that points to this checkout; installing and trusting the plugin remain explicit desktop actions. The verification runner and demos remain repository-local.
+
+## License and community
+
+Engineering Guard is released under the [MIT License](LICENSE).
+
+- [Contributing](CONTRIBUTING.md): setup, tests and how to open a pull request. Please also read the [Code of Conduct](CODE_OF_CONDUCT.md).
+- [Security policy](SECURITY.md): how to raise a security concern and what is in scope.
+
+Acknowledgement: the security skill's AI/LLM, client-side and supply-chain companions adapt ideas, in our own words, from [cloudflare/security-audit-skill](https://github.com/cloudflare/security-audit-skill) (MIT, Copyright (c) 2025-2026 Cloudflare, Inc.).

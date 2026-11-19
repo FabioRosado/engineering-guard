@@ -74,7 +74,7 @@ Add a system-wide factory dashboard that aggregates job state from all active re
   - **In Progress:** Jobs grouped by repository name, each card shows worktree path as sub-label
   - **Archive:** Completed jobs with similar layout
 - Job cards display:
-  - Repository name + worktree path (e.g., "myapp (/Users/fabio/projects/myapp-feature)")
+  - Repository name + worktree path (e.g., "myapp (/home/user/projects/myapp-feature)")
   - Job ID and title
   - Stage column + round badges
   - Reviewer chips (PASS/CHANGES/N/A/pending)
@@ -134,8 +134,8 @@ When a factory syncs, it sends:
 ```json
 {
   "repository": "myapp",
-  "repo_path": "/Users/fabio/projects/myapp",
-  "worktree_path": "/Users/fabio/projects/myapp",
+  "repo_path": "/home/user/projects/myapp",
+  "worktree_path": "/home/user/projects/myapp",
   "job": {
     "id": "001-add-rate-limiting",
     "title": "Add rate limiting to the login endpoint",
